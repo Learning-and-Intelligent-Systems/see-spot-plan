@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+.DS_Store
+.vscode
+*.egg-info
+*.pkl
+*~
+*.python-version
+*.csv
+*.zip
+*.so
