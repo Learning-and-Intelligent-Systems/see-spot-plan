@@ -13,6 +13,3 @@ Currently, the main script in the repo is `spot_localization.py`. Here is an exa
 python spot_utils/spot_localization.py --hostname 192.168.80.3 --map_name b45-621
 ```
 You can 'hijack' the robot via the tablet when prompted, move it around, and then have it print out its pose! We can then command it to navigate to any saved pose via other utilities (which are forthcoming).
-
-
-test branch protection
