@@ -6,8 +6,6 @@ from typing import Optional, Tuple
 
 import cv2
 import numpy as np
-import scipy
-import yaml
 from bosdyn.api import estop_pb2, robot_state_pb2
 from bosdyn.client import math_helpers
 from bosdyn.client.estop import EstopClient

@@ -8,6 +8,7 @@ Before using this interface, follow instructions from the 'Mapping' section
 of the README file under the spot_utils folder.
 """
 
+import argparse
 import logging
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ from bosdyn.client.graph_nav import GraphNavClient
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.sdk import Robot
 
-from predicators.spot_utils.utils import get_robot_state
+from spot_utils.utils import get_graph_nav_dir, get_robot_state, verify_estop
 
 NUM_LOCALIZATION_RETRIES = 10
 LOCALIZATION_RETRY_WAIT_TIME = 1.0
@@ -162,17 +163,16 @@ if __name__ == "__main__":
     from bosdyn.client import create_standard_sdk
     from bosdyn.client.util import authenticate
 
-    from predicators import utils
-    from predicators.settings import CFG
-    from predicators.spot_utils.utils import get_graph_nav_dir, verify_estop
-
     def _run_manual_test() -> None:
-        # TODO: setup arg parse here to get the hostname, etc.
+        # Argparse setup to get robot hostname
+        parser = argparse.ArgumentParser(description="Parse the robot's hostname.")
+        parser.add_argument('--hostname', type=str, required=True, help="The robot's hostname/ip-address (e.g. 192.168.80.3)")
+        parser.add_argument('--map_name', type=str, required=True, help="The name of the map folder to load (sub-folder under graph_nav_maps)")
+        args = parser.parse_args()
 
         # Get constants.
-        hostname = CFG.spot_robot_ip
-        # TODO: pass map filename into get_graph_nav_dir
-        path = get_graph_nav_dir()
+        hostname = args.hostname
+        path = get_graph_nav_dir(args.map_name)
         sdk = create_standard_sdk('GraphNavTestClient')
         robot = sdk.create_robot(hostname)
         authenticate(robot)
