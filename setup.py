@@ -24,5 +24,6 @@ setup(name="see_spot_run",
               "yapf==0.32.0",
               "docformatter==1.4",
               "isort==5.10.1",
+              "docformatter",
           ]
       })
