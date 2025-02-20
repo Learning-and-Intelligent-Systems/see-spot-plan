@@ -1,0 +1,81 @@
+import argparse
+
+import numpy as np
+from bosdyn.client import create_standard_sdk, math_helpers
+from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
+from bosdyn.client.util import authenticate
+
+from skills.grasp import grasp_at_pixel
+from skills.spot_hand_move import move_hand_to_relative_pose, open_gripper
+from skills.spot_navigation import navigate_to_absolute_pose
+from spot_utils.perception.spot_cameras import capture_images
+from spot_utils.spot_localization import SpotLocalizer
+from spot_utils.utils import get_graph_nav_dir, get_pixel_from_user, \
+    verify_estop
+
+DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3))
+
+DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2))
+
+direction_to_pose = {"DOWN": DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE, "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE}
+
+LOCALIZER = None
+ROBOT = None
+
+
+def init(hostname: str, map_name: str) -> None:
+    global LOCALIZER
+    global ROBOT
+
+    sdk = create_standard_sdk('NavigationSkillTestClient')
+    ROBOT = sdk.create_robot(hostname)
+    authenticate(ROBOT)
+    verify_estop(ROBOT)
+    path = get_graph_nav_dir(map_name)
+    lease_client = ROBOT.ensure_client(LeaseClient.default_service_name)
+    lease_client.take()
+    lease_keepalive = LeaseKeepAlive(lease_client,
+                                     must_acquire=True,
+                                     return_at_exit=True)
+    LOCALIZER = SpotLocalizer(ROBOT, path, lease_client, lease_keepalive)
+    ROBOT.time_sync.wait_for_sync()
+    LOCALIZER.localize()
+
+
+def move_to(x_abs: float, y_abs: float, yaw_abs: float) -> None:
+    desired_pose = math_helpers.SE2Pose(x=x_abs, y=y_abs, angle=yaw_abs)
+    if ROBOT is not None and LOCALIZER is not None:
+        navigate_to_absolute_pose(ROBOT, LOCALIZER, desired_pose)
+
+
+def gaze(direction: str) -> None:
+    look_pose = direction_to_pose[direction]
+    move_hand_to_relative_pose(ROBOT, look_pose)
+    open_gripper(ROBOT)
+
+
+def grasp() -> None:
+    # Capture an image.
+    camera = "hand_color_image"
+    if ROBOT is not None and LOCALIZER is not None:
+        rgbd = capture_images(ROBOT, LOCALIZER, [camera])[camera]
+
+        # Select a pixel manually.
+        pixel = get_pixel_from_user(rgbd.rgb)
+
+        # Grasp at the pixel with a top-down grasp.
+        top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
+        grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Parse the robot's hostname.")
+    parser.add_argument('--hostname', type=str, required=True, help="The robot's hostname/ip-address (e.g. 192.168.80.3)")
+    parser.add_argument('--map_name', type=str, required=True, help="The name of the map folder to load (sub-folder under graph_nav_maps)")
+    parser.add_argument('--plan', type=str, required=True, help="Path of the Plan to run")
+    args = parser.parse_args()
+    init(args.hostname, args.map_name)
+    with open(args.plan, 'r') as plan_file:
+        exec(plan_file.read())

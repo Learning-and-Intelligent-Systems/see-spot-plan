@@ -15,6 +15,7 @@ setup(name="see_spot_run",
           "types-PyYAML",
           "bosdyn-client >= 3.1",
           "opencv-python == 4.7.0.72",
+          "scipy",
       ],
       include_package_data=True,
       extras_require={
@@ -23,5 +24,6 @@ setup(name="see_spot_run",
               "yapf==0.32.0",
               "docformatter==1.4",
               "isort==5.10.1",
+              "docformatter",
           ]
       })

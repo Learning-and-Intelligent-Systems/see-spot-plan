@@ -1,0 +1,3 @@
+move_to(x_abs=3.072, y_abs=-0.155, yaw_abs=-2.986471)
+gaze("DOWN")
+grasp()

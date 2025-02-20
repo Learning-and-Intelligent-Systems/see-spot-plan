@@ -1,11 +1,12 @@
 """Interface for localizing spot in a previously mapped environment.
 
-The main point of this code is to provide a consistent world frame within and
-between runs. That way, absolute positions of objects that are saved in task
-files remain accurate, even when starting the robot from a different location.
+The main point of this code is to provide a consistent world frame
+within and between runs. That way, absolute positions of objects that
+are saved in task files remain accurate, even when starting the robot
+from a different location.
 
-Before using this interface, follow instructions from the 'Mapping' section
-of the README file under the spot_utils folder.
+Before using this interface, follow instructions from the 'Mapping'
+section of the README file under the spot_utils folder.
 """
 
 import argparse
