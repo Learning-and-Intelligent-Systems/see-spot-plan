@@ -130,6 +130,3 @@ def get_robot_gripper_open_percentage(robot: Robot) -> float:
     """Get the current state of how open the gripper is."""
     robot_state = get_robot_state(robot)
     return float(robot_state.manipulator_state.gripper_open_percentage)
-
-
-
