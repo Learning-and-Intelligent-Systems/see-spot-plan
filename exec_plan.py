@@ -1,3 +1,12 @@
+"""Parsing script for running high-level commands on the spot.
+
+This code makes it possible to write down a sequence of robot commands
+in a text file and have them run on the real robot. The logic for
+managing, e.g., the lease for the spot and the relevant datastructures
+for specifiying SE(2) poses can be abstracted away from the high-level
+plan provided as input.
+"""
+
 import argparse
 
 import numpy as np
@@ -71,6 +80,8 @@ def grasp() -> None:
 
 
 if __name__ == "__main__":
+    # running this script standalone initializes a bosdyn robot and localizer.
+    # It then executes the list of commands provided in the plan file
     parser = argparse.ArgumentParser(description="Parse the robot's hostname.")
     parser.add_argument('--hostname', type=str, required=True, help="The robot's hostname/ip-address (e.g. 192.168.80.3)")
     parser.add_argument('--map_name', type=str, required=True, help="The name of the map folder to load (sub-folder under graph_nav_maps)")

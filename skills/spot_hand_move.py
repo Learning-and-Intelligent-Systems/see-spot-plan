@@ -1,13 +1,14 @@
-"""Interface for moving the spot hand."""
+"""Interface for moving and stowing the spot hand."""
 
 import argparse
 import time
 
-from bosdyn.api import arm_command_pb2, robot_command_pb2, \
-    synchronized_command_pb2, trajectory_pb2
+from bosdyn.api import arm_command_pb2, manipulation_api_pb2, \
+    robot_command_pb2, synchronized_command_pb2, trajectory_pb2
 from bosdyn.client import math_helpers
 from bosdyn.client.frame_helpers import BODY_FRAME_NAME, ODOM_FRAME_NAME, \
     get_a_tform_b
+from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import RobotCommandBuilder, \
     RobotCommandClient, block_until_arm_arrives
 from bosdyn.client.robot_state import RobotStateClient
@@ -157,6 +158,33 @@ def close_gripper(
 ) -> None:
     """Close the spot gripper."""
     return change_gripper(robot, fraction=0.0, duration=duration)
+
+
+def stow_arm(robot: Robot, timeout: float = 5) -> None:
+    """Execute a stow arm command."""
+
+    manipulation_client = robot.ensure_client(
+        ManipulationApiClient.default_service_name)
+    robot_command_client = robot.ensure_client(
+        RobotCommandClient.default_service_name)
+
+    # Enable stowing.
+    override = manipulation_api_pb2.ApiGraspedCarryStateOverride(
+        override_request=3)
+    grasp_override_request = manipulation_api_pb2.ApiGraspOverrideRequest(
+        carry_state_override=override)
+    manipulation_client.grasp_override_command(grasp_override_request)
+
+    # Build the commands.
+    stow_cmd = RobotCommandBuilder.arm_stow_command()
+    close_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(0.0)
+
+    # Combine the arm and gripper commands into one RobotCommand
+    combo_cmd = RobotCommandBuilder.build_synchro_command(close_cmd, stow_cmd)
+    cmd_id = robot_command_client.robot_command(combo_cmd)
+
+    # Send the command.
+    block_until_arm_arrives(robot_command_client, cmd_id, timeout)
 
 
 if __name__ == "__main__":

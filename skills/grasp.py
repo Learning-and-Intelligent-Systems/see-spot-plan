@@ -12,8 +12,7 @@ from bosdyn.client.frame_helpers import VISION_FRAME_NAME, \
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.sdk import Robot
 
-from skills.spot_hand_move import close_gripper
-from skills.spot_stow_arm import stow_arm
+from skills.spot_hand_move import close_gripper, stow_arm
 from spot_utils.perception.perception_structs import RGBDImageWithContext
 from spot_utils.utils import get_robot_state
 
