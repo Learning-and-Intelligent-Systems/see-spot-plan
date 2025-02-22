@@ -15,6 +15,7 @@ setup(name="see_spot_run",
           "types-PyYAML",
           "bosdyn-client >= 3.1",
           "opencv-python == 4.7.0.72",
+          "scipy",
       ],
       include_package_data=True,
       extras_require={
