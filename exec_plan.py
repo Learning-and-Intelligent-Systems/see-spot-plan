@@ -19,7 +19,7 @@ from skills.spot_hand_move import move_hand_to_relative_pose, open_gripper
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
-from spot_utils.utils import get_graph_nav_dir, get_pixel_from_user, \
+from spot_utils.utils import get_graph_nav_dir, get_pixel_from_grounded_sam, \
     verify_estop
 
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
@@ -65,18 +65,24 @@ def gaze(direction: str) -> None:
     open_gripper(ROBOT)
 
 
-def grasp() -> None:
+def grasp(text_prompt: str) -> None:
     # Capture an image.
     camera = "hand_color_image"
     if ROBOT is not None and LOCALIZER is not None:
         rgbd = capture_images(ROBOT, LOCALIZER, [camera])[camera]
 
-        # Select a pixel manually.
-        pixel = get_pixel_from_user(rgbd.rgb)
+        # Select a pixel by querying GroundedSAM.
+        pixel = get_pixel_from_grounded_sam(rgbd.rgb, text_prompt)
 
-        # Grasp at the pixel with a top-down grasp.
-        top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
-        grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+        if pixel is not None:
+            # Grasp at the pixel with a top-down grasp.
+            top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
+            grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+
+
+def _reset_hand() -> None:
+    open_gripper(ROBOT)
+    gaze("DOWN")
 
 
 if __name__ == "__main__":
