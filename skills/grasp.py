@@ -7,8 +7,7 @@ from typing import Optional, Tuple
 
 from bosdyn.api import geometry_pb2, manipulation_api_pb2
 from bosdyn.client import math_helpers
-from bosdyn.client.frame_helpers import VISION_FRAME_NAME, \
-    get_vision_tform_body
+from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.sdk import Robot
 
@@ -17,14 +16,16 @@ from spot_utils.perception.perception_structs import RGBDImageWithContext
 from spot_utils.utils import get_robot_state
 
 
-def grasp_at_pixel(robot: Robot,
-                   rgbd: RGBDImageWithContext,
-                   pixel: Tuple[int, int],
-                   grasp_rot: Optional[math_helpers.Quat] = None,
-                   rot_thresh: float = 0.17,
-                   move_while_grasping: bool = True,
-                   timeout: float = 20.0,
-                   retry_with_no_constraints: bool = False) -> None:
+def grasp_at_pixel(
+    robot: Robot,
+    rgbd: RGBDImageWithContext,
+    pixel: Tuple[int, int],
+    grasp_rot: Optional[math_helpers.Quat] = None,
+    rot_thresh: float = 0.17,
+    move_while_grasping: bool = True,
+    timeout: float = 20.0,
+    retry_with_no_constraints: bool = False,
+) -> None:
     """Grasp an object at a specified pixel in the RGBD image, which should be
     from the hand camera and should be up to date with the robot's state.
 
@@ -37,7 +38,8 @@ def grasp_at_pixel(robot: Robot,
     assert rgbd.camera_name == "hand_color_image"
 
     manipulation_client = robot.ensure_client(
-        ManipulationApiClient.default_service_name)
+        ManipulationApiClient.default_service_name
+    )
 
     if move_while_grasping:
         # Stow Arm first (only if robot is allowed to move while grasping)
@@ -54,76 +56,91 @@ def grasp_at_pixel(robot: Robot,
         transforms_snapshot_for_camera=rgbd.transforms_snapshot,
         frame_name_image_sensor=rgbd.frame_name_image_sensor,
         camera_model=rgbd.camera_model,
-        walk_gaze_mode=walk_gaze_mode)
+        walk_gaze_mode=walk_gaze_mode,
+    )
 
     # If a desired rotation for the hand was given, add a grasp constraint.
     if grasp_rot is not None:
         robot_state = get_robot_state(robot)
         grasp.grasp_params.grasp_params_frame_name = VISION_FRAME_NAME  # pylint: disable=no-member
         vision_tform_body = get_vision_tform_body(
-            robot_state.kinematic_state.transforms_snapshot)
+            robot_state.kinematic_state.transforms_snapshot
+        )
         # Rotation from the body to our desired grasp.
         vision_rot = vision_tform_body.rotation * grasp_rot
         # Turn into a proto.
         constraint = grasp.grasp_params.allowable_orientation.add()  # pylint: disable=no-member
         constraint.rotation_with_tolerance.rotation_ewrt_frame.CopyFrom(
-            vision_rot.to_proto())
+            vision_rot.to_proto()
+        )
         constraint.rotation_with_tolerance.threshold_radians = rot_thresh
 
     # Create the request.
     grasp_request = manipulation_api_pb2.ManipulationApiRequest(
-        pick_object_in_image=grasp)
+        pick_object_in_image=grasp
+    )
 
     # Send the request.
     cmd_response = manipulation_client.manipulation_api_command(
-        manipulation_api_request=grasp_request)
+        manipulation_api_request=grasp_request
+    )
 
     # Get feedback from the robot and execute grasping, repeating until a
     # proper response is received.
     start_time = time.perf_counter()
     while (time.perf_counter() - start_time) <= timeout:
         feedback_request = manipulation_api_pb2.ManipulationApiFeedbackRequest(
-            manipulation_cmd_id=cmd_response.manipulation_cmd_id)
+            manipulation_cmd_id=cmd_response.manipulation_cmd_id
+        )
         response = manipulation_client.manipulation_api_feedback_command(
-            manipulation_api_feedback_request=feedback_request)
+            manipulation_api_feedback_request=feedback_request
+        )
         # Uncomment this for debugging why the grasp might be failing
         # repeatedly.
         # print(response.current_state)
         if response.current_state in [
-                manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED,
-                manipulation_api_pb2.MANIP_STATE_GRASP_FAILED,
-                manipulation_api_pb2.MANIP_STATE_GRASP_PLANNING_NO_SOLUTION
+            manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED,
+            manipulation_api_pb2.MANIP_STATE_GRASP_FAILED,
+            manipulation_api_pb2.MANIP_STATE_GRASP_PLANNING_NO_SOLUTION,
         ]:
             break
     if (time.perf_counter() - start_time) > timeout:
         logging.warning("Timed out waiting for grasp to execute!")
 
     # Retry grasping with no constraints if the corresponding arg is true.
-    if response.current_state in [
+    if (
+        response.current_state
+        in [
             manipulation_api_pb2.MANIP_STATE_GRASP_PLANNING_NO_SOLUTION,
-            manipulation_api_pb2.MANIP_STATE_GRASP_FAILED
-    ] and retry_with_no_constraints:
+            manipulation_api_pb2.MANIP_STATE_GRASP_FAILED,
+        ]
+        and retry_with_no_constraints
+    ):
         print("WARNING: grasp planning failed, retrying with no constraint")
         grasp = manipulation_api_pb2.PickObjectInImage(
             pixel_xy=pick_vec,
             transforms_snapshot_for_camera=rgbd.transforms_snapshot,
             frame_name_image_sensor=rgbd.frame_name_image_sensor,
             camera_model=rgbd.camera_model,
-            walk_gaze_mode=1)
+            walk_gaze_mode=1,
+        )
         grasp_request = manipulation_api_pb2.ManipulationApiRequest(
-            pick_object_in_image=grasp)
+            pick_object_in_image=grasp
+        )
         cmd_response = manipulation_client.manipulation_api_command(
-            manipulation_api_request=grasp_request)
+            manipulation_api_request=grasp_request
+        )
         while (time.perf_counter() - start_time) <= timeout:
-            feedback_request = manipulation_api_pb2.\
-                ManipulationApiFeedbackRequest(
-                manipulation_cmd_id=cmd_response.manipulation_cmd_id)
+            feedback_request = manipulation_api_pb2.ManipulationApiFeedbackRequest(
+                manipulation_cmd_id=cmd_response.manipulation_cmd_id
+            )
             response = manipulation_client.manipulation_api_feedback_command(
-                manipulation_api_feedback_request=feedback_request)
+                manipulation_api_feedback_request=feedback_request
+            )
             if response.current_state in [
-                    manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED,
-                    manipulation_api_pb2.MANIP_STATE_GRASP_FAILED,
-                    manipulation_api_pb2.MANIP_STATE_GRASP_PLANNING_NO_SOLUTION
+                manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED,
+                manipulation_api_pb2.MANIP_STATE_GRASP_FAILED,
+                manipulation_api_pb2.MANIP_STATE_GRASP_PLANNING_NO_SOLUTION,
             ]:
                 break
         if (time.perf_counter() - start_time) > timeout:
@@ -147,26 +164,35 @@ if __name__ == "__main__":
 
     from spot_utils.perception.spot_cameras import capture_images
     from spot_utils.spot_localization import SpotLocalizer
-    from spot_utils.utils import get_graph_nav_dir, get_pixel_from_user, \
-        verify_estop
+    from spot_utils.utils import get_graph_nav_dir, get_pixel_from_user, verify_estop
 
     def _run_manual_test() -> None:
         parser = argparse.ArgumentParser(description="Parse the robot's hostname.")
-        parser.add_argument('--hostname', type=str, required=True, help="The robot's hostname/ip-address (e.g. 192.168.80.3)")
-        parser.add_argument('--map_name', type=str, required=True, help="The name of the map folder to load (sub-folder under graph_nav_maps)")
+        parser.add_argument(
+            "--hostname",
+            type=str,
+            required=True,
+            help="The robot's hostname/ip-address (e.g. 192.168.80.3)",
+        )
+        parser.add_argument(
+            "--map_name",
+            type=str,
+            required=True,
+            help="The name of the map folder to load (sub-folder under graph_nav_maps)",
+        )
         args = parser.parse_args()
 
         hostname = args.hostname
         path = get_graph_nav_dir(args.map_name)
-        sdk = create_standard_sdk('GraspSkillTestClient')
+        sdk = create_standard_sdk("GraspSkillTestClient")
         robot = sdk.create_robot(hostname)
         authenticate(robot)
         verify_estop(robot)
         lease_client = robot.ensure_client(LeaseClient.default_service_name)
         lease_client.take()
-        lease_keepalive = LeaseKeepAlive(lease_client,
-                                         must_acquire=True,
-                                         return_at_exit=True)
+        lease_keepalive = LeaseKeepAlive(
+            lease_client, must_acquire=True, return_at_exit=True
+        )
         robot.time_sync.wait_for_sync()
         localizer = SpotLocalizer(robot, path, lease_client, lease_keepalive)
 

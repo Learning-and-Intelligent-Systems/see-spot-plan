@@ -16,25 +16,33 @@ from numpy.typing import NDArray
 
 # Pose for the hand (relative to the body) that looks down in front.
 DEFAULT_HAND_LOOK_DOWN_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 6))
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 6)
+)
 DEFAULT_HAND_DROP_OBJECT_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=-0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2))
+    x=0.80, y=0.0, z=-0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
+)
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3))
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
+)
 DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2))
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
+)
 DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE_HIGH = math_helpers.SE3Pose(
-    x=0.65, y=0.0, z=0.32, rot=math_helpers.Quat.from_pitch(np.pi / 2.5))
+    x=0.65, y=0.0, z=0.32, rot=math_helpers.Quat.from_pitch(np.pi / 2.5)
+)
 DEFAULT_HAND_PRE_DUMP_LIFT_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.3, rot=math_helpers.Quat.from_pitch(2 * np.pi / 3))
+    x=0.80, y=0.0, z=0.3, rot=math_helpers.Quat.from_pitch(2 * np.pi / 3)
+)
 DEFAULT_HAND_PRE_DUMP_POSE = math_helpers.SE3Pose(
     x=0.80,
     y=0.0,
     z=0.25,
-    rot=math_helpers.Quat.from_pitch(np.pi / 2) *
-    math_helpers.Quat.from_yaw(np.pi / 1.1))
+    rot=math_helpers.Quat.from_pitch(np.pi / 2)
+    * math_helpers.Quat.from_yaw(np.pi / 1.1),
+)
 DEFAULT_HAND_POST_DUMP_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2))
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
+)
 
 
 def get_graph_nav_dir(map_room_name: str) -> Path:
@@ -48,9 +56,11 @@ def verify_estop(robot: Robot) -> None:
 
     client = robot.ensure_client(EstopClient.default_service_name)
     if client.get_status().stop_level != estop_pb2.ESTOP_LEVEL_NONE:
-        error_message = "Robot is estopped. Please use an external" + \
-            " E-Stop client, such as the estop SDK example, to" + \
-            " configure E-Stop."
+        error_message = (
+            "Robot is estopped. Please use an external"
+            + " E-Stop client, such as the estop SDK example, to"
+            + " configure E-Stop."
+        )
         robot.logger.error(error_message)
         raise Exception(error_message)
 
@@ -76,7 +86,7 @@ def get_pixel_from_user(rgb: NDArray[np.uint8]) -> Tuple[int, int]:
 
     while image_click is None:
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q') or key == ord('Q'):
+        if key == ord("q") or key == ord("Q"):
             # Quit and terminate the process (if you're panicking.)
             sys.exit()
 
@@ -86,10 +96,11 @@ def get_pixel_from_user(rgb: NDArray[np.uint8]) -> Tuple[int, int]:
 
 
 def get_relative_se2_from_se3(
-        robot_pose: math_helpers.SE3Pose,
-        target_pose: math_helpers.SE3Pose,
-        target_offset_distance: float = 0.0,
-        target_offset_angle: float = 0.0) -> math_helpers.SE2Pose:
+    robot_pose: math_helpers.SE3Pose,
+    target_pose: math_helpers.SE3Pose,
+    target_offset_distance: float = 0.0,
+    target_offset_angle: float = 0.0,
+) -> math_helpers.SE2Pose:
     """Given a current se3 pose and a target se3 pose on the same plane, return
     a relative se2 pose for moving from the current to the target.
 
@@ -110,16 +121,14 @@ def get_relative_se2_from_se3(
     return robot_se2.inverse() * target_se2
 
 
-def get_robot_state(robot: Robot,
-                    timeout_per_call: float = 20,
-                    num_retries: int = 10) -> robot_state_pb2.RobotState:
+def get_robot_state(
+    robot: Robot, timeout_per_call: float = 20, num_retries: int = 10
+) -> robot_state_pb2.RobotState:
     """Get the robot state."""
-    robot_state_client = robot.ensure_client(
-        RobotStateClient.default_service_name)
+    robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
     for _ in range(num_retries):
         try:
-            robot_state = robot_state_client.get_robot_state(
-                timeout=timeout_per_call)
+            robot_state = robot_state_client.get_robot_state(timeout=timeout_per_call)
             return robot_state
         except (TimedOutError, ProxyConnectionError):
             print("WARNING: get robot state failed once, retrying...")
@@ -130,4 +139,3 @@ def get_robot_gripper_open_percentage(robot: Robot) -> float:
     """Get the current state of how open the gripper is."""
     robot_state = get_robot_state(robot)
     return float(robot_state.manipulator_state.gripper_open_percentage)
-

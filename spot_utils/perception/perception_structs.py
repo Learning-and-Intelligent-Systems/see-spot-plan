@@ -12,6 +12,7 @@ from scipy import ndimage
 class RGBDImageWithContext:
     """An RGBD image with context including the pose and intrinsics of the
     camera."""
+
     rgb: NDArray[np.uint8]
     depth: NDArray[np.uint16]
     image_rot: float

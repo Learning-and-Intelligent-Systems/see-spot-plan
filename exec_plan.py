@@ -19,16 +19,20 @@ from skills.spot_hand_move import move_hand_to_relative_pose, open_gripper
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
-from spot_utils.utils import get_graph_nav_dir, get_pixel_from_user, \
-    verify_estop
+from spot_utils.utils import get_graph_nav_dir, get_pixel_from_user, verify_estop
 
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3))
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
+)
 
 DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2))
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
+)
 
-direction_to_pose = {"DOWN": DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE, "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE}
+direction_to_pose = {
+    "DOWN": DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE,
+    "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE,
+}
 
 LOCALIZER = None
 ROBOT = None
@@ -38,16 +42,16 @@ def init(hostname: str, map_name: str) -> None:
     global LOCALIZER
     global ROBOT
 
-    sdk = create_standard_sdk('NavigationSkillTestClient')
+    sdk = create_standard_sdk("NavigationSkillTestClient")
     ROBOT = sdk.create_robot(hostname)
     authenticate(ROBOT)
     verify_estop(ROBOT)
     path = get_graph_nav_dir(map_name)
     lease_client = ROBOT.ensure_client(LeaseClient.default_service_name)
     lease_client.take()
-    lease_keepalive = LeaseKeepAlive(lease_client,
-                                     must_acquire=True,
-                                     return_at_exit=True)
+    lease_keepalive = LeaseKeepAlive(
+        lease_client, must_acquire=True, return_at_exit=True
+    )
     LOCALIZER = SpotLocalizer(ROBOT, path, lease_client, lease_keepalive)
     ROBOT.time_sync.wait_for_sync()
     LOCALIZER.localize()
@@ -83,10 +87,22 @@ if __name__ == "__main__":
     # running this script standalone initializes a bosdyn robot and localizer.
     # It then executes the list of commands provided in the plan file
     parser = argparse.ArgumentParser(description="Parse the robot's hostname.")
-    parser.add_argument('--hostname', type=str, required=True, help="The robot's hostname/ip-address (e.g. 192.168.80.3)")
-    parser.add_argument('--map_name', type=str, required=True, help="The name of the map folder to load (sub-folder under graph_nav_maps)")
-    parser.add_argument('--plan', type=str, required=True, help="Path of the Plan to run")
+    parser.add_argument(
+        "--hostname",
+        type=str,
+        required=True,
+        help="The robot's hostname/ip-address (e.g. 192.168.80.3)",
+    )
+    parser.add_argument(
+        "--map_name",
+        type=str,
+        required=True,
+        help="The name of the map folder to load (sub-folder under graph_nav_maps)",
+    )
+    parser.add_argument(
+        "--plan", type=str, required=True, help="Path of the Plan to run"
+    )
     args = parser.parse_args()
     init(args.hostname, args.map_name)
-    with open(args.plan, 'r') as plan_file:
+    with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
