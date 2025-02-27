@@ -3,7 +3,7 @@ name: see_spot_plan
 on: [push]
 
 jobs:
-  static-type-checking:
+  lint-and-type-check:
     runs-on: ubuntu-latest
     strategy:
       matrix:
