@@ -10,16 +10,23 @@ jobs:
         python-version: ["3.10.14"]
     steps:
     - uses: actions/checkout@v2
+
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v2
       with:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
         cache-dependency-path: '**/setup.py'
+
     - name: Install dependencies
       run: |
         pip install -e .
-        pip install mypy==1.8.0
+        pip install mypy==1.8.0 ruff  # Install Ruff
+
+    - name: Run Ruff (Linting)
+      run: |
+        ruff check  # Run Ruff with the config in ruff.toml
+
     - name: Mypy
       run: |
         mypy . --config-file mypy.ini
