@@ -1,3 +1,5 @@
+"""Data structures useful for perception."""
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,7 +13,8 @@ from scipy import ndimage
 @dataclass
 class RGBDImageWithContext:
     """An RGBD image with context including the pose and intrinsics of the
-    camera."""
+    camera.
+    """
 
     rgb: NDArray[np.uint8]
     depth: NDArray[np.uint16]

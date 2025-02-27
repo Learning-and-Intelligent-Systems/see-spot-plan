@@ -42,6 +42,7 @@ class SpotLocalizer:
         lease_client: LeaseClient,
         lease_keepalive: LeaseKeepAlive,
     ) -> None:
+        """Initialize the localizer."""
         self._robot = robot
         self._upload_path = upload_path
         self._lease_client = lease_client
@@ -62,11 +63,11 @@ class SpotLocalizer:
         self._robot_pose = math_helpers.SE3Pose(0, 0, 0, math_helpers.Quat())
         # Initialize the robot's position in the map.
         robot_state = get_robot_state(self._robot)
-        z_position = (
-            robot_state.kinematic_state.transforms_snapshot.child_to_parent_edge_map[
-                "gpe"
-            ].parent_tform_child.position.z
-        )
+        # z_position = (
+        #     robot_state.kinematic_state.transforms_snapshot.child_to_parent_edge_map[
+        #         "gpe"
+        #     ].parent_tform_child.position.z
+        # )
         current_odom_tform_body = get_odom_tform_body(
             robot_state.kinematic_state.transforms_snapshot
         ).to_proto()
@@ -166,9 +167,6 @@ class SpotLocalizer:
         logging.info("Localization succeeded.")
         self._robot_pose = math_helpers.SE3Pose.from_proto(transform)
         return None
-
-    def yeet_thru(self):
-        return "test"
 
 
 if __name__ == "__main__":

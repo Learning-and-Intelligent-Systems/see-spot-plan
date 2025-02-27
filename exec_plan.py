@@ -39,6 +39,7 @@ ROBOT = None
 
 
 def init(hostname: str, map_name: str) -> None:
+    """Initialize the robot and the localizer."""
     global LOCALIZER
     global ROBOT
 
@@ -58,18 +59,21 @@ def init(hostname: str, map_name: str) -> None:
 
 
 def move_to(x_abs: float, y_abs: float, yaw_abs: float) -> None:
+    """Move the robot to the specified absolute pose."""
     desired_pose = math_helpers.SE2Pose(x=x_abs, y=y_abs, angle=yaw_abs)
     if ROBOT is not None and LOCALIZER is not None:
         navigate_to_absolute_pose(ROBOT, LOCALIZER, desired_pose)
 
 
 def gaze(direction: str) -> None:
+    """Move the hand to look in a certain direction."""
     look_pose = direction_to_pose[direction]
     move_hand_to_relative_pose(ROBOT, look_pose)
     open_gripper(ROBOT)
 
 
 def grasp() -> None:
+    """Grasp an object at a specified pixel."""
     # Capture an image.
     camera = "hand_color_image"
     if ROBOT is not None and LOCALIZER is not None:

@@ -62,7 +62,7 @@ def move_hand_to_relative_pose_with_velocity(
     duration: float = 2.0,
 ) -> None:
     """Move the spot hand with a certain velocity specified as a duration (so
-    velocity will become 1/duration)
+    velocity will become 1/duration).
 
     The curr hand pose and target pose are relative to the robot's body.
     """
@@ -184,7 +184,6 @@ def close_gripper(
 
 def stow_arm(robot: Robot, timeout: float = 5) -> None:
     """Execute a stow arm command."""
-
     manipulation_client = robot.ensure_client(
         ManipulationApiClient.default_service_name
     )

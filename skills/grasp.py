@@ -30,9 +30,8 @@ def grasp_at_pixel(
     from the hand camera and should be up to date with the robot's state.
 
     The `move_while_grasping` param dictates whether we're allowing the
-    robot to automatically move its feet while grasping or not.
-
-    The `retry_with_no_constraints` dictates whether after failing to grasp we
+    robot to automatically move its feet while grasping or not. The
+    `retry_with_no_constraints` dictates whether after failing to grasp we
     try again but with all constraints on the grasp removed.
     """
     assert rgbd.camera_name == "hand_color_image"

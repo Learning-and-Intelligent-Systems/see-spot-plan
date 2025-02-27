@@ -53,7 +53,6 @@ def get_graph_nav_dir(map_room_name: str) -> Path:
 
 def verify_estop(robot: Robot) -> None:
     """Verify the robot is not estopped."""
-
     client = robot.ensure_client(EstopClient.default_service_name)
     if client.get_status().stop_level != estop_pb2.ESTOP_LEVEL_NONE:
         error_message = (
@@ -67,13 +66,13 @@ def verify_estop(robot: Robot) -> None:
 
 def get_pixel_from_user(rgb: NDArray[np.uint8]) -> Tuple[int, int]:
     """Use open CV GUI to select a pixel on the given image."""
-
     image_click: Optional[Tuple[int, int]] = None
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
     def _callback(event: int, x: int, y: int, flags: int, param: None) -> None:
         """Callback for the click-to-grasp functionality with the Spot API's
-        grasping interface."""
+        grasping interface.
+        """
         del flags, param
         nonlocal image_click
         if event == cv2.EVENT_LBUTTONUP:
@@ -105,10 +104,9 @@ def get_relative_se2_from_se3(
     a relative se2 pose for moving from the current to the target.
 
     Also add an angle and distance offset to the target pose. The returned
-    se2 pose is facing toward the target.
-
-    Typical use case: we know the current se3 pose for the body of the robot
-    and the se3 pose for a table, and we want to move in front of the table.
+    se2 pose is facing toward the target. Typical use case: we know the current
+    se3 pose for the body of the robot and the se3 pose for a table, and we want
+    to move in front of the table.
     """
     dx = np.cos(target_offset_angle) * target_offset_distance
     dy = np.sin(target_offset_angle) * target_offset_distance

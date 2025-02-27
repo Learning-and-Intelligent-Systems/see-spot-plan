@@ -1,3 +1,5 @@
+"""Helper functions for capturing and manipulating images from Spot's cameras."""
+
 from typing import Collection, Dict, Optional, Type
 
 import cv2
