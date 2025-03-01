@@ -8,6 +8,7 @@ plan provided as input.
 """
 
 import argparse
+from typing import Optional
 
 import numpy as np
 from bosdyn.client import create_standard_sdk, math_helpers
@@ -19,8 +20,8 @@ from skills.spot_hand_move import move_hand_to_relative_pose, open_gripper
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
-from spot_utils.utils import get_graph_nav_dir, get_pixel_from_user, \
-    verify_estop
+from spot_utils.utils import get_graph_nav_dir, get_pixel_from_grounded_sam, \
+    get_pixel_from_user, verify_estop
 
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
     x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3))
@@ -32,11 +33,13 @@ direction_to_pose = {"DOWN": DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE, "AHEAD": DEFA
 
 LOCALIZER = None
 ROBOT = None
+SAM_ENDPOINT = None
 
 
-def init(hostname: str, map_name: str) -> None:
+def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
     global LOCALIZER
     global ROBOT
+    global SAM_ENDPOINT
 
     sdk = create_standard_sdk('NavigationSkillTestClient')
     ROBOT = sdk.create_robot(hostname)
@@ -51,6 +54,7 @@ def init(hostname: str, map_name: str) -> None:
     LOCALIZER = SpotLocalizer(ROBOT, path, lease_client, lease_keepalive)
     ROBOT.time_sync.wait_for_sync()
     LOCALIZER.localize()
+    SAM_ENDPOINT = endpoint_url
 
 
 def move_to(x_abs: float, y_abs: float, yaw_abs: float) -> None:
@@ -65,18 +69,28 @@ def gaze(direction: str) -> None:
     open_gripper(ROBOT)
 
 
-def grasp() -> None:
+def grasp(text_prompt: Optional[str]) -> None:
     # Capture an image.
     camera = "hand_color_image"
     if ROBOT is not None and LOCALIZER is not None:
         rgbd = capture_images(ROBOT, LOCALIZER, [camera])[camera]
 
-        # Select a pixel manually.
-        pixel = get_pixel_from_user(rgbd.rgb)
+        if text_prompt and SAM_ENDPOINT:
+            # Select a pixel by querying GroundedSAM.
+            pixel = get_pixel_from_grounded_sam(rgbd.rgb, text_prompt, SAM_ENDPOINT)
+        else:
+            # Select a pixel by querying the user.
+            pixel = get_pixel_from_user(rgbd.rgb)
 
-        # Grasp at the pixel with a top-down grasp.
-        top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
-        grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+        if pixel is not None:
+            # Grasp at the pixel with a top-down grasp.
+            top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
+            grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+
+
+def _reset_hand() -> None:
+    open_gripper(ROBOT)
+    gaze("DOWN")
 
 
 if __name__ == "__main__":
@@ -86,7 +100,8 @@ if __name__ == "__main__":
     parser.add_argument('--hostname', type=str, required=True, help="The robot's hostname/ip-address (e.g. 192.168.80.3)")
     parser.add_argument('--map_name', type=str, required=True, help="The name of the map folder to load (sub-folder under graph_nav_maps)")
     parser.add_argument('--plan', type=str, required=True, help="Path of the Plan to run")
+    parser.add_argument('--sam_endpoint', type=str, required=False, help="Address of endpoint hosting GroundedSAM")
     args = parser.parse_args()
-    init(args.hostname, args.map_name)
+    init(args.hostname, args.map_name, args.sam_endpoint)
     with open(args.plan, 'r') as plan_file:
         exec(plan_file.read())

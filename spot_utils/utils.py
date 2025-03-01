@@ -1,11 +1,13 @@
 """Small utility functions for spot."""
 
+import io
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
 import cv2
 import numpy as np
+import requests
 from bosdyn.api import estop_pb2, robot_state_pb2
 from bosdyn.client import math_helpers
 from bosdyn.client.estop import EstopClient
@@ -83,6 +85,33 @@ def get_pixel_from_user(rgb: NDArray[np.uint8]) -> Tuple[int, int]:
     cv2.destroyAllWindows()
 
     return image_click
+
+
+def get_pixel_from_grounded_sam(rgb: NDArray[np.uint8], text_prompt: str, endpoint_url: str) -> Optional[Tuple[int, int]]:
+    """Pick a pixel in rgb that matches text_prompt.
+
+    This function queries a server hosting a GroundedSAM instance (e.g.
+    https://github.com/chsahit/GroundedSAMEndpoint),
+    in order to get an image mask corresponding to the given text. It then computes the center of this mask and returns this pixel. This assumes the object matching text_prompt contains its center.
+    """
+    _, encoded_image = cv2.imencode(".png", rgb)
+    image_bytes = io.BytesIO(encoded_image.tobytes())
+    files = {"file": ("image.png", image_bytes, "image/png")}
+    data = {"text_prompt": text_prompt}
+    response = requests.post(endpoint_url, files=files, data=data)
+
+    # Check the response
+    if response.status_code == 200:
+        # Convert the received boolean masks back into NumPy arrays
+        masks = [np.array(mask, dtype=bool) for mask in response.json()]
+        y_coords, x_coords = np.where(masks[0])
+        center_x = int(np.mean(x_coords))
+        center_y = int(np.mean(y_coords))
+        pixel = (center_x, center_y)
+        return pixel
+    else:
+        print(f"Error: {response.status_code}, {response.text}")
+        return None
 
 
 def get_relative_se2_from_se3(
