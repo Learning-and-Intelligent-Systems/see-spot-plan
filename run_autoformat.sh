@@ -1,3 +1,3 @@
 #!/bin/bash
-ruff check --select I --fix
+ruff check
 ruff format

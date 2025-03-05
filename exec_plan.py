@@ -20,7 +20,12 @@ from skills.spot_hand_move import move_hand_to_relative_pose, open_gripper
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
-from spot_utils.utils import get_graph_nav_dir, get_pixel_from_user, verify_estop
+from spot_utils.utils import (
+    get_graph_nav_dir,
+    get_pixel_from_grounded_sam,
+    get_pixel_from_user,
+    verify_estop,
+)
 
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
     x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
@@ -40,7 +45,7 @@ ROBOT = None
 SAM_ENDPOINT = None
 
 
-def init(hostname: str, map_name: str) -> None:
+def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
     """Initialize the robot and the localizer."""
     global LOCALIZER
     global ROBOT
@@ -76,7 +81,7 @@ def gaze(direction: str) -> None:
     open_gripper(ROBOT)
 
 
-def grasp() -> None:
+def grasp(text_prompt: Optional[str]) -> None:
     """Grasp an object at a specified pixel."""
     # Capture an image.
     camera = "hand_color_image"
