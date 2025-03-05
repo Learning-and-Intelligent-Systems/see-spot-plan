@@ -8,6 +8,7 @@ plan provided as input.
 """
 
 import argparse
+from typing import Optional
 
 import numpy as np
 from bosdyn.client import create_standard_sdk, math_helpers
@@ -36,12 +37,14 @@ direction_to_pose = {
 
 LOCALIZER = None
 ROBOT = None
+SAM_ENDPOINT = None
 
 
 def init(hostname: str, map_name: str) -> None:
     """Initialize the robot and the localizer."""
     global LOCALIZER
     global ROBOT
+    global SAM_ENDPOINT
 
     sdk = create_standard_sdk("NavigationSkillTestClient")
     ROBOT = sdk.create_robot(hostname)
@@ -56,6 +59,7 @@ def init(hostname: str, map_name: str) -> None:
     LOCALIZER = SpotLocalizer(ROBOT, path, lease_client, lease_keepalive)
     ROBOT.time_sync.wait_for_sync()
     LOCALIZER.localize()
+    SAM_ENDPOINT = endpoint_url
 
 
 def move_to(x_abs: float, y_abs: float, yaw_abs: float) -> None:
@@ -79,12 +83,22 @@ def grasp() -> None:
     if ROBOT is not None and LOCALIZER is not None:
         rgbd = capture_images(ROBOT, LOCALIZER, [camera])[camera]
 
-        # Select a pixel manually.
-        pixel = get_pixel_from_user(rgbd.rgb)
+        if text_prompt and SAM_ENDPOINT:
+            # Select a pixel by querying GroundedSAM.
+            pixel = get_pixel_from_grounded_sam(rgbd.rgb, text_prompt, SAM_ENDPOINT)
+        else:
+            # Select a pixel by querying the user.
+            pixel = get_pixel_from_user(rgbd.rgb)
 
-        # Grasp at the pixel with a top-down grasp.
-        top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
-        grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+        if pixel is not None:
+            # Grasp at the pixel with a top-down grasp.
+            top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
+            grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+
+
+def _reset_hand() -> None:
+    open_gripper(ROBOT)
+    gaze("DOWN")
 
 
 if __name__ == "__main__":
