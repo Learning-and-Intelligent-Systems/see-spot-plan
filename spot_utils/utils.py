@@ -96,7 +96,9 @@ def get_pixel_from_user(rgb: NDArray[np.uint8]) -> Tuple[int, int]:
     return image_click
 
 
-def get_pixel_from_grounded_sam(rgb: NDArray[np.uint8], text_prompt: str, endpoint_url: str) -> Optional[Tuple[int, int]]:
+def get_pixel_from_grounded_sam(
+    rgb: NDArray[np.uint8], text_prompt: str, endpoint_url: str
+) -> Optional[Tuple[int, int]]:
     """Pick a pixel in rgb that matches text_prompt.
 
     This function queries a server hosting a GroundedSAM instance (e.g.
