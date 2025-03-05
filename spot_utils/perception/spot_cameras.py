@@ -1,3 +1,5 @@
+"""Helper functions for capturing and manipulating images from Spot's cameras."""
+
 from typing import Collection, Dict, Optional, Type
 
 import cv2
@@ -13,7 +15,8 @@ from spot_utils.spot_localization import SpotLocalizer
 
 
 def _image_response_to_image(
-    image_response: image_pb2.ImageResponse, ) -> NDArray:
+    image_response: image_pb2.ImageResponse,
+) -> NDArray:
     """Extract an image from an image response.
 
     The type of image (rgb, depth, etc.) is detected based on the
@@ -36,8 +39,8 @@ def _image_response_to_image(
 
     # Convert BGR to RGB.
     if pixel_format in [
-            image_pb2.Image.PIXEL_FORMAT_RGB_U8,
-            image_pb2.Image.PIXEL_FORMAT_RGBA_U8
+        image_pb2.Image.PIXEL_FORMAT_RGB_U8,
+        image_pb2.Image.PIXEL_FORMAT_RGBA_U8,
     ]:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
@@ -48,12 +51,12 @@ def _image_response_to_image(
 
 
 ROTATION_ANGLE = {
-    'hand_color_image': 0,
-    'back_fisheye_image': 0,
-    'frontleft_fisheye_image': -78,
-    'frontright_fisheye_image': -102,
-    'left_fisheye_image': 0,
-    'right_fisheye_image': 180
+    "hand_color_image": 0,
+    "back_fisheye_image": 0,
+    "frontleft_fisheye_image": -78,
+    "frontright_fisheye_image": -102,
+    "left_fisheye_image": 0,
+    "right_fisheye_image": 180,
 }
 RGB_TO_DEPTH_CAMERAS = {
     "hand_color_image": "hand_depth_in_hand_color_frame",
@@ -61,7 +64,7 @@ RGB_TO_DEPTH_CAMERAS = {
     "right_fisheye_image": "right_depth_in_visual_frame",
     "frontleft_fisheye_image": "frontleft_depth_in_visual_frame",
     "frontright_fisheye_image": "frontright_depth_in_visual_frame",
-    "back_fisheye_image": "back_depth_in_visual_frame"
+    "back_fisheye_image": "back_depth_in_visual_frame",
 }
 
 # Hack to avoid double image capturing when we want to (1) get object states
@@ -104,15 +107,15 @@ def capture_images(
             rgb_pixel_format = None
         else:
             rgb_pixel_format = image_pb2.Image.PIXEL_FORMAT_RGB_U8  # pylint: disable=no-member
-        rgb_img_req = build_image_request(camera_name,
-                                          quality_percent=quality_percent,
-                                          pixel_format=rgb_pixel_format)
+        rgb_img_req = build_image_request(
+            camera_name, quality_percent=quality_percent, pixel_format=rgb_pixel_format
+        )
         img_reqs.append(rgb_img_req)
         # Build depth image request.
         depth_camera_name = RGB_TO_DEPTH_CAMERAS[camera_name]
-        depth_img_req = build_image_request(depth_camera_name,
-                                            quality_percent=quality_percent,
-                                            pixel_format=None)
+        depth_img_req = build_image_request(
+            depth_camera_name, quality_percent=quality_percent, pixel_format=None
+        )
         img_reqs.append(depth_img_req)
 
     # Send the request.
@@ -128,7 +131,9 @@ def capture_images(
         # Create transform.
         camera_tform_body = get_a_tform_b(
             rgb_img_resp.shot.transforms_snapshot,
-            rgb_img_resp.shot.frame_name_image_sensor, BODY_FRAME_NAME)
+            rgb_img_resp.shot.frame_name_image_sensor,
+            BODY_FRAME_NAME,
+        )
         camera_tform_world = camera_tform_body * body_tform_world
         world_tform_camera = camera_tform_world.inverse()
         # Extract other context.
@@ -138,10 +143,17 @@ def capture_images(
         frame_name_image_sensor = rgb_img_resp.shot.frame_name_image_sensor
         camera_model = rgb_img_resp.source.pinhole
         # Finish RGBDImageWithContext.
-        rgbd = RGBDImageWithContext(rgb_img, depth_img, rot, camera_name,
-                                    world_tform_camera, depth_scale,
-                                    transforms_snapshot,
-                                    frame_name_image_sensor, camera_model)
+        rgbd = RGBDImageWithContext(
+            rgb_img,
+            depth_img,
+            rot,
+            camera_name,
+            world_tform_camera,
+            depth_scale,
+            transforms_snapshot,
+            frame_name_image_sensor,
+            camera_model,
+        )
         rgbds[camera_name] = rgbd
 
     _LAST_CAPTURED_IMAGES = rgbds

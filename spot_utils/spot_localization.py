@@ -35,9 +35,14 @@ class LocalizationFailure(Exception):
 class SpotLocalizer:
     """Localizes spot in a previously mapped environment."""
 
-    def __init__(self, robot: Robot, upload_path: Path,
-                 lease_client: LeaseClient,
-                 lease_keepalive: LeaseKeepAlive) -> None:
+    def __init__(
+        self,
+        robot: Robot,
+        upload_path: Path,
+        lease_client: LeaseClient,
+        lease_keepalive: LeaseKeepAlive,
+    ) -> None:
+        """Initialize the localizer."""
         self._robot = robot
         self._upload_path = upload_path
         self._lease_client = lease_client
@@ -48,7 +53,8 @@ class SpotLocalizer:
 
         # Create the client for the Graph Nav main service.
         self.graph_nav_client = self._robot.ensure_client(
-            GraphNavClient.default_service_name)
+            GraphNavClient.default_service_name
+        )
 
         # Upload graph and snapshots on start.
         self._upload_graph_and_snapshots()
@@ -57,16 +63,21 @@ class SpotLocalizer:
         self._robot_pose = math_helpers.SE3Pose(0, 0, 0, math_helpers.Quat())
         # Initialize the robot's position in the map.
         robot_state = get_robot_state(self._robot)
-        z_position = robot_state.kinematic_state.transforms_snapshot.child_to_parent_edge_map[
-            "gpe"].parent_tform_child.position.z
+        # z_position = (
+        #     robot_state.kinematic_state.transforms_snapshot.child_to_parent_edge_map[
+        #         "gpe"
+        #     ].parent_tform_child.position.z
+        # )
         current_odom_tform_body = get_odom_tform_body(
-            robot_state.kinematic_state.transforms_snapshot).to_proto()
+            robot_state.kinematic_state.transforms_snapshot
+        ).to_proto()
         localization = nav_pb2.Localization()
         for r in range(NUM_LOCALIZATION_RETRIES + 1):
             try:
                 self.graph_nav_client.set_localization(
                     initial_guess_localization=localization,
-                    ko_tform_body=current_odom_tform_body)
+                    ko_tform_body=current_odom_tform_body,
+                )
                 break
             except (ResponseError, TimedOutError) as e:
                 # Retry or fail.
@@ -88,8 +99,10 @@ class SpotLocalizer:
             data = f.read()
             current_graph = map_pb2.Graph()
             current_graph.ParseFromString(data)
-            logging.info(f"Loaded graph has {len(current_graph.waypoints)} "
-                         f"waypoints and {len(current_graph.edges)} edges")
+            logging.info(
+                f"Loaded graph has {len(current_graph.waypoints)} "
+                f"waypoints and {len(current_graph.edges)} edges"
+            )
         # Load the waypoint snapshots from disk.
         waypoint_path = self._upload_path / "waypoint_snapshots"
         waypoint_snapshots: Dict[str, map_pb2.WaypointSnapshot] = {}
@@ -112,7 +125,8 @@ class SpotLocalizer:
         logging.info("Uploading the graph and snapshots to the robot...")
         true_if_empty = not len(current_graph.anchoring.anchors)
         response = self.graph_nav_client.upload_graph(
-            graph=current_graph, generate_new_anchoring=true_if_empty)
+            graph=current_graph, generate_new_anchoring=true_if_empty
+        )
         # Upload the snapshots to the robot.
         for snapshot_id in response.unknown_waypoint_snapshot_ids:
             waypoint_snapshot = waypoint_snapshots[snapshot_id]
@@ -128,9 +142,7 @@ class SpotLocalizer:
         """
         return self._robot_pose
 
-    def localize(self,
-                 num_retries: int = 10,
-                 retry_wait_time: float = 1.0) -> None:
+    def localize(self, num_retries: int = 10, retry_wait_time: float = 1.0) -> None:
         """Re-localize the robot and return the current SE3Pose of the body.
 
         It's good practice to call this periodically to avoid drift
@@ -149,8 +161,9 @@ class SpotLocalizer:
                 raise LocalizationFailure(msg)
             logging.warning("Localization failed once, retrying.")
             time.sleep(retry_wait_time)
-            return self.localize(num_retries=num_retries - 1,
-                                 retry_wait_time=retry_wait_time)
+            return self.localize(
+                num_retries=num_retries - 1, retry_wait_time=retry_wait_time
+            )
         logging.info("Localization succeeded.")
         self._robot_pose = math_helpers.SE3Pose.from_proto(transform)
         return None
@@ -167,22 +180,32 @@ if __name__ == "__main__":
     def _run_manual_test() -> None:
         # Argparse setup to get robot hostname
         parser = argparse.ArgumentParser(description="Parse the robot's hostname.")
-        parser.add_argument('--hostname', type=str, required=True, help="The robot's hostname/ip-address (e.g. 192.168.80.3)")
-        parser.add_argument('--map_name', type=str, required=True, help="The name of the map folder to load (sub-folder under graph_nav_maps)")
+        parser.add_argument(
+            "--hostname",
+            type=str,
+            required=True,
+            help="The robot's hostname/ip-address (e.g. 192.168.80.3)",
+        )
+        parser.add_argument(
+            "--map_name",
+            type=str,
+            required=True,
+            help="The name of the map folder to load (sub-folder under graph_nav_maps)",
+        )
         args = parser.parse_args()
 
         # Get constants.
         hostname = args.hostname
         path = get_graph_nav_dir(args.map_name)
-        sdk = create_standard_sdk('GraphNavTestClient')
+        sdk = create_standard_sdk("GraphNavTestClient")
         robot = sdk.create_robot(hostname)
         authenticate(robot)
         verify_estop(robot)
         lease_client = robot.ensure_client(LeaseClient.default_service_name)
         lease_client.take()
-        lease_keepalive = LeaseKeepAlive(lease_client,
-                                         must_acquire=True,
-                                         return_at_exit=True)
+        lease_keepalive = LeaseKeepAlive(
+            lease_client, must_acquire=True, return_at_exit=True
+        )
 
         assert path.exists()
         localizer = SpotLocalizer(robot, path, lease_client, lease_keepalive)
