@@ -125,7 +125,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--plan", type=str, required=True, help="Path of the Plan to run"
     )
+    parser.add_argument(
+        "--sam_endpoint",
+        type=str,
+        required=False,
+        help="Address of endpoint hosting GroundedSAM",
+    )
     args = parser.parse_args()
-    init(args.hostname, args.map_name)
+    init(args.hostname, args.map_name, args.sam_endpoint)
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
