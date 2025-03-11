@@ -133,7 +133,7 @@ def main():
             timestep += 1
             time.sleep(DATA_PLAYBACK_INTERVAL)
 
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, FileNotFoundError):
         print("Stopping playback.")
 
 
