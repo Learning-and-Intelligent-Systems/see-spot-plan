@@ -53,6 +53,7 @@ def main():
         "left_fisheye_image",
         "right_fisheye_image",
         "back_fisheye_image",
+        "hand_color_image",
     ]
 
     # Create a directory to save the demonstration data.
@@ -92,13 +93,41 @@ def main():
                 }
                 for joint_state in arm_joint_state
             ]
+
+            # Get end-effector pose
+            end_effector_pose = robot_state.kinematic_state.transforms_snapshot.child_to_parent_edge_map[
+                "hand"
+            ].parent_tform_child
+
+            # Get gripper open/close value
+            gripper_state = robot_state.manipulator_state.gripper_open_percentage
+
+            # Add end-effector pose and gripper state to the dictionary
+            robot_data = {
+                "arm_joint_state": arm_joint_state_list,
+                "end_effector_pose": {
+                    "position": {
+                        "x": end_effector_pose.position.x,
+                        "y": end_effector_pose.position.y,
+                        "z": end_effector_pose.position.z,
+                    },
+                    "rotation": {
+                        "x": end_effector_pose.rotation.x,
+                        "y": end_effector_pose.rotation.y,
+                        "z": end_effector_pose.rotation.z,
+                        "w": end_effector_pose.rotation.w,
+                    },
+                },
+                "gripper_open_percentage": gripper_state,
+            }
+
             # Save the robot state to a pickle file
             with open(
                 f"demonstrations/{demo_folder_name}/{timestep}/robot_state.pkl", "wb"
             ) as state_file:
-                pkl.dump(arm_joint_state_list, state_file)
+                pkl.dump(robot_data, state_file)
 
-            print(f"Saving data for timestep {timestep}: {arm_joint_state_list}")
+            print(f"Saving data for timestep {timestep}: {robot_data}")
 
             timestep += 1
             time.sleep(DATA_COLLECTION_INTERVAL)
