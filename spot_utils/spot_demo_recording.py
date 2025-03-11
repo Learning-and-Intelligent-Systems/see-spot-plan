@@ -1,5 +1,8 @@
 """Script to record demonstration data from the Spot. Run this script and then use the tablet to
 teleop the robot for data collection.
+
+Example usage:
+python spot_utils/spot_demo_recording.py --hostname 192.168.80.3 --demo_folder_name test_data_recording0
 """
 
 import argparse
@@ -54,15 +57,15 @@ def main():
 
     # Create a directory to save the demonstration data.
     demo_folder_name = args.demo_folder_name
-    os.mkdir("demonstrations/" + demo_folder_name, parents=True, exist_ok=False)
+    os.makedirs("demonstrations/" + demo_folder_name, exist_ok=False)
 
+    print("Starting data collection! Press Ctrl+C to stop.")
     try:
         timestep = 0
         while True:
             # Make a folder corresponding to the current timestep.
-            os.mkdir(
+            os.makedirs(
                 f"demonstrations/{demo_folder_name}/{timestep}",
-                parents=True,
                 exist_ok=False,
             )
             # Capture images from all selected cameras
@@ -77,13 +80,27 @@ def main():
                         img_file.write(image_response.shot.image.data)
 
             # Get robot state (includes arm joint angles)
-            robot_state = get_robot_state()
+            robot_state = get_robot_state(robot)
             arm_joint_state = robot_state.kinematic_state.joint_states
+
+            # Convert arm_joint_state to a list of dictionaries
+            arm_joint_state_list = [
+                {
+                    "name": joint_state.name,
+                    "position": joint_state.position.value,
+                    "velocity": joint_state.velocity.value,
+                }
+                for joint_state in arm_joint_state
+            ]
+            # Save the robot state to a pickle file
             with open(
                 f"demonstrations/{demo_folder_name}/{timestep}/robot_state.pkl", "wb"
             ) as state_file:
-                pkl.dump(arm_joint_state, state_file)
+                pkl.dump(arm_joint_state_list, state_file)
 
+            print(f"Saving data for timestep {timestep}: {arm_joint_state_list}")
+
+            timestep += 1
             time.sleep(DATA_COLLECTION_INTERVAL)
 
     except KeyboardInterrupt:
