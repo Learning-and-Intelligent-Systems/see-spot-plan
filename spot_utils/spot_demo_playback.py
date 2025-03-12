@@ -173,7 +173,7 @@ def main():
 
             timestep_index += 1
 
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, FileNotFoundError):
         print("Stopping playback.")
 
 
