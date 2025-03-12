@@ -6,6 +6,7 @@ python spot_utils/spot_demo_playback.py --hostname 192.168.80.3 --demo_folder_na
 
 import argparse
 import time
+import os
 
 import dill as pkl
 from bosdyn.api import arm_command_pb2, robot_command_pb2, synchronized_command_pb2
@@ -14,6 +15,7 @@ from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.util import authenticate
+from bosdyn.client.time_sync import TimeSyncClient
 
 DATA_PLAYBACK_INTERVAL = 1.0  # seconds
 ARM_JOINT_NAMES = [
@@ -72,7 +74,11 @@ def main():
     sdk = create_standard_sdk("SpotDemoPlayback")
     robot = sdk.create_robot(hostname)
     authenticate(robot)
+    
+    # Ensure time sync client is created
+    robot.time_sync = robot.ensure_client(TimeSyncClient.default_service_name)
     robot.time_sync.wait_for_sync()
+    
     command_client = robot.ensure_client(RobotCommandClient.default_service_name)
     manipulation_api_client = robot.ensure_client(
         ManipulationApiClient.default_service_name
@@ -88,16 +94,43 @@ def main():
 
     verify_estop(robot)
 
+    # Get the number of timesteps in the demo folder
+    demo_path = f"demonstrations/{demo_folder_name}"
+    timesteps = sorted([int(ts) for ts in os.listdir(demo_path) if ts.isdigit()])
+    
+    if not timesteps:
+        print(f"No timesteps found in {demo_path}")
+        return
+    
+    print(f"Found {len(timesteps)} timesteps in {demo_path}")
+    
+    # Set up for timestamp-based playback
+    playback_start_time = time.time()
+    
     # Playback the demonstration data
-    timestep = 0
+    timestep_index = 0
     try:
-        while True:
+        while timestep_index < len(timesteps):
+            timestep = timesteps[timestep_index]
+            
             # Load the robot state from the pickle file
             with open(
-                f"demonstrations/{demo_folder_name}/{timestep}/robot_state.pkl", "rb"
+                f"{demo_path}/{timestep}/robot_state.pkl", "rb"
             ) as state_file:
                 robot_data = pkl.load(state_file)
 
+            # Get the timestamp of this data point
+            data_timestamp = robot_data.get("timestamp", timestep_index)  # Default to index if no timestamp
+            
+            # Calculate how much time has passed in our playback
+            current_playback_time = time.time() - playback_start_time
+            
+            # If we're ahead of schedule, wait until it's time to execute this step
+            if current_playback_time < data_timestamp:
+                wait_time = data_timestamp - current_playback_time
+                print(f"Waiting {wait_time:.2f}s for timestep {timestep}")
+                time.sleep(wait_time)
+            
             # Extract arm joint states
             arm_joint_state_list = robot_data["arm_joint_state"]
             # Extract gripper state
@@ -110,6 +143,7 @@ def main():
             assert len(joint_name_to_position) == len(ARM_JOINT_NAMES), (
                 "Missing joint positions in the data."
             )
+            
             # Create and send the arm joint command
             joint_trajectory_point = (
                 RobotCommandBuilder.create_arm_joint_trajectory_point(
@@ -119,19 +153,25 @@ def main():
                     joint_name_to_position["arm0.el1"],
                     joint_name_to_position["arm0.wr0"],
                     joint_name_to_position["arm0.wr1"],
+                    # Use the timestamp for trajectory timing
+                    # TODO verify if this is correct
+                    time_since_reference_secs=data_timestamp
                 )
             )
+            
+            # Create ArmJointTrajectory with points
             arm_joint_traj = arm_command_pb2.ArmJointTrajectory(
                 points=[joint_trajectory_point]
             )
+            
             # Make a RobotCommand
             command = make_robot_command(arm_joint_traj)
+            
             # Send the request
             cmd_id = command_client.robot_command(command)
-            print(f"Executed command for timestep {timestep}")
+            print(f"Executed command for timestep {timestep} at timestamp {data_timestamp:.2f}s")
 
-            timestep += 1
-            time.sleep(DATA_PLAYBACK_INTERVAL)
+            timestep_index += 1
 
     except KeyboardInterrupt:
         print("Stopping playback.")

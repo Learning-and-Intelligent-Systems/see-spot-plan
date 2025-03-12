@@ -11,6 +11,7 @@ import time
 
 import dill as pkl
 from bosdyn.client.image import ImageClient
+from bosdyn.client.time_sync import TimeSyncClient
 
 from spot_utils.utils import get_robot_state, verify_estop
 
@@ -45,7 +46,11 @@ def main():
     robot = sdk.create_robot(hostname)
     authenticate(robot)
     verify_estop(robot)
+    
+    # Ensure time sync client is created
+    robot.time_sync = robot.ensure_client(TimeSyncClient.default_service_name)
     robot.time_sync.wait_for_sync()
+    
     image_client = robot.ensure_client(ImageClient.default_service_name)
     camera_sources = [
         "frontleft_fisheye_image",
@@ -63,7 +68,13 @@ def main():
     print("Starting data collection! Press Ctrl+C to stop.")
     try:
         timestep = 0
+        start_time = time.time()  # Record the start time
+        
         while True:
+            # Record the current timestamp relative to start
+            current_time = time.time()
+            relative_timestamp = current_time - start_time
+            
             # Make a folder corresponding to the current timestep.
             os.makedirs(
                 f"demonstrations/{demo_folder_name}/{timestep}",
@@ -119,6 +130,7 @@ def main():
                     },
                 },
                 "gripper_open_percentage": gripper_state,
+                "timestamp": relative_timestamp,  # Add the relative timestamp
             }
 
             # Save the robot state to a pickle file
