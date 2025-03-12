@@ -48,7 +48,6 @@ def main():
     verify_estop(robot)
     
     # Ensure time sync client is created
-    robot.time_sync = robot.ensure_client(TimeSyncClient.default_service_name)
     robot.time_sync.wait_for_sync()
     
     image_client = robot.ensure_client(ImageClient.default_service_name)

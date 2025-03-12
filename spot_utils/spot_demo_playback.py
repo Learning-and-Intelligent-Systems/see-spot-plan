@@ -15,9 +15,8 @@ from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.util import authenticate
-from bosdyn.client.time_sync import TimeSyncClient
 
-DATA_PLAYBACK_INTERVAL = 1.0  # seconds
+
 ARM_JOINT_NAMES = [
     "arm0.sh0",
     "arm0.sh1",
@@ -76,7 +75,6 @@ def main():
     authenticate(robot)
     
     # Ensure time sync client is created
-    robot.time_sync = robot.ensure_client(TimeSyncClient.default_service_name)
     robot.time_sync.wait_for_sync()
     
     command_client = robot.ensure_client(RobotCommandClient.default_service_name)
