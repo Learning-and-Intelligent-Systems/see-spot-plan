@@ -26,6 +26,9 @@ ARM_JOINT_NAMES = [
     "arm0.wr1",
 ]
 
+# Time buffer for the first action to prevent too-fast initial movement
+FIRST_ACTION_BUFFER = 0.5  # seconds
+
 
 def make_robot_command(arm_joint_traj):
     """Helper function to create a RobotCommand from an ArmJointTrajectory.
@@ -43,6 +46,17 @@ def make_robot_command(arm_joint_traj):
     )
     arm_sync_robot_cmd = robot_command_pb2.RobotCommand(synchronized_command=sync_arm)
     return RobotCommandBuilder.build_synchro_command(arm_sync_robot_cmd)
+
+
+def block_until_arm_arrives(command_client, cmd_id, timeout_sec):
+    """Helper that blocks until the arm command completes or times out."""
+    start_time = time.time()
+    while time.time() - start_time < timeout_sec:
+        feedback_resp = command_client.robot_command_feedback(cmd_id)
+        if feedback_resp.feedback.synchronized_feedback.arm_command_feedback.status == arm_command_pb2.ArmCommandFeedback.STATUS_TRAJECTORY_COMPLETE:
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def main():
@@ -101,9 +115,13 @@ def main():
         return
     
     print(f"Found {len(timesteps)} timesteps in {demo_path}")
+    print(f"First action buffer: {FIRST_ACTION_BUFFER}s")
     
     # Set up for timestamp-based playback
     playback_start_time = time.time()
+    last_robot_data = None
+    last_execution_time = 0
+    last_gripper_percentage = None
     
     # Playback the demonstration data
     timestep_index = 0
@@ -119,13 +137,27 @@ def main():
 
             # Get the timestamp of this data point
             data_timestamp = robot_data.get("timestamp", timestep_index)  # Default to index if no timestamp
+
+            # Determine the delta time to use for trajectory timing
+            if last_robot_data is not None:
+                last_data_timestamp = last_robot_data.get("timestamp", timestep_index - 1)
+                if data_timestamp < last_data_timestamp:
+                    print(f"Warning: Data timestamp {data_timestamp} is less than last data timestamp {last_data_timestamp}. Skipping this timestep.")
+                    timestep_index += 1
+                    continue
+                # Calculate time difference between current and previous action
+                delta_time = data_timestamp - last_data_timestamp
+            else:
+                # First action uses the buffer time
+                delta_time = FIRST_ACTION_BUFFER
             
             # Calculate how much time has passed in our playback
             current_playback_time = time.time() - playback_start_time
             
             # If we're ahead of schedule, wait until it's time to execute this step
-            if current_playback_time < data_timestamp:
-                wait_time = data_timestamp - current_playback_time
+            wait_point = last_execution_time + (0 if timestep_index == 0 else delta_time)
+            if current_playback_time < wait_point:
+                wait_time = wait_point - current_playback_time
                 print(f"Waiting {wait_time:.2f}s for timestep {timestep}")
                 time.sleep(wait_time)
             
@@ -133,6 +165,17 @@ def main():
             arm_joint_state_list = robot_data["arm_joint_state"]
             # Extract gripper state
             gripper_open_percentage = robot_data["gripper_open_percentage"]
+            
+            # Check if gripper state has changed and needs to be updated
+            if last_gripper_percentage is None or abs(gripper_open_percentage - last_gripper_percentage) > 0.02:  # 2% threshold
+                # Update gripper position
+                gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(gripper_open_percentage)
+                gripper_cmd_id = command_client.robot_command(gripper_cmd)
+                print(f"Setting gripper position to {gripper_open_percentage:.2f}")
+                
+                # Don't block for the gripper - let it move while we prepare the arm command
+                last_gripper_percentage = gripper_open_percentage
+            
             # Now we need to extract the position value of each of the robot's joints.
             joint_name_to_position = {}
             for joint in arm_joint_state_list:
@@ -143,6 +186,7 @@ def main():
             )
             
             # Create and send the arm joint command
+            # Use delta_time for time_since_reference_secs to specify how long to take to reach the position
             joint_trajectory_point = (
                 RobotCommandBuilder.create_arm_joint_trajectory_point(
                     joint_name_to_position["arm0.sh0"],
@@ -151,9 +195,8 @@ def main():
                     joint_name_to_position["arm0.el1"],
                     joint_name_to_position["arm0.wr0"],
                     joint_name_to_position["arm0.wr1"],
-                    # Use the timestamp for trajectory timing
-                    # TODO verify if this is correct
-                    time_since_reference_secs=data_timestamp
+                    # Tell the robot to reach this position after delta_time seconds
+                    time_since_reference_secs=delta_time
                 )
             )
             
@@ -167,9 +210,12 @@ def main():
             
             # Send the request
             cmd_id = command_client.robot_command(command)
-            print(f"Executed command for timestep {timestep} at timestamp {data_timestamp:.2f}s")
-
+            print(f"Executed command for timestep {timestep}, moving to position over {delta_time:.2f}s")
+            
+            # Update tracking variables
+            last_execution_time = time.time() - playback_start_time
             timestep_index += 1
+            last_robot_data = robot_data
 
     except (KeyboardInterrupt, FileNotFoundError):
         print("Stopping playback.")

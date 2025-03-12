@@ -15,7 +15,7 @@ from bosdyn.client.time_sync import TimeSyncClient
 
 from spot_utils.utils import get_robot_state, verify_estop
 
-DATA_COLLECTION_INTERVAL = 1.0  # seconds
+DATA_COLLECTION_INTERVAL = 1.0 / 5.0  # 5 Hz
 
 
 def main():
