@@ -15,7 +15,7 @@ from bosdyn.client.time_sync import TimeSyncClient
 
 from spot_utils.utils import get_robot_state, verify_estop
 
-DATA_COLLECTION_INTERVAL = 1.0 / 5.0  # 5 Hz
+DATA_COLLECTION_INTERVAL = 1.0 / 4.0  # 10 Hz
 
 
 def main():
@@ -95,14 +95,21 @@ def main():
             arm_joint_state = robot_state.kinematic_state.joint_states
 
             # Convert arm_joint_state to a list of dictionaries
-            arm_joint_state_list = [
-                {
+            # Ensure we're capturing both position and velocity data
+            arm_joint_state_list = []
+            for joint_state in arm_joint_state:
+                joint_data = {
                     "name": joint_state.name,
                     "position": joint_state.position.value,
-                    "velocity": joint_state.velocity.value,
                 }
-                for joint_state in arm_joint_state
-            ]
+                
+                # Make sure velocity exists before accessing it
+                if joint_state.velocity is not None and hasattr(joint_state.velocity, 'value'):
+                    joint_data["velocity"] = joint_state.velocity.value
+                else:
+                    joint_data["velocity"] = 0.0  # Default to zero if no velocity data
+                
+                arm_joint_state_list.append(joint_data)
 
             # Get end-effector pose
             end_effector_pose = robot_state.kinematic_state.transforms_snapshot.child_to_parent_edge_map[
@@ -138,7 +145,15 @@ def main():
             ) as state_file:
                 pkl.dump(robot_data, state_file)
 
-            print(f"Saving data for timestep {timestep}: {robot_data}")
+            # Print information about the capture, including velocity data
+            arm_joints = {joint["name"]: joint for joint in arm_joint_state_list}
+            velocity_info = ""
+            for joint_name in ["arm0.sh0", "arm0.sh1", "arm0.el0", "arm0.el1", "arm0.wr0", "arm0.wr1"]:
+                if joint_name in arm_joints:
+                    velocity_info += f"{joint_name}: {arm_joints[joint_name]['velocity']:.3f} "
+            
+            print(f"Saving data for timestep {timestep} at {relative_timestamp:.2f}s")
+            print(f"Velocities: {velocity_info}")
 
             timestep += 1
             time.sleep(DATA_COLLECTION_INTERVAL)
