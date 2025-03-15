@@ -5,19 +5,21 @@ python spot_utils/spot_demo_playback.py --hostname 192.168.80.3 --demo_folder_na
 """
 
 import argparse
-import time
 import os
+import time
 
 import dill as pkl
-from google.protobuf import any_pb2, wrappers_pb2
-from bosdyn.api import arm_command_pb2, robot_command_pb2, synchronized_command_pb2, gripper_command_pb2, trajectory_pb2
+from bosdyn.api import (
+    arm_command_pb2,
+    robot_command_pb2,
+    synchronized_command_pb2,
+)
 from bosdyn.client import create_standard_sdk
-from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
-from bosdyn.client.manipulation_api_client import ManipulationApiClient
+from bosdyn.client.lease import LeaseClient
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.util import authenticate
 from bosdyn.util import seconds_to_duration
-
+from google.protobuf import wrappers_pb2
 
 ARM_JOINT_NAMES = [
     "arm0.sh0",
@@ -55,7 +57,10 @@ def block_until_arm_arrives(command_client, cmd_id, timeout_sec):
     start_time = time.time()
     while time.time() - start_time < timeout_sec:
         feedback_resp = command_client.robot_command_feedback(cmd_id)
-        if feedback_resp.feedback.synchronized_feedback.arm_command_feedback.status == arm_command_pb2.ArmCommandFeedback.STATUS_TRAJECTORY_COMPLETE:
+        if (
+            feedback_resp.feedback.synchronized_feedback.arm_command_feedback.status
+            == arm_command_pb2.ArmCommandFeedback.STATUS_TRAJECTORY_COMPLETE
+        ):
             return True
         time.sleep(0.1)
     return False
@@ -70,26 +75,28 @@ def create_synchronized_command(arm_joint_traj, gripper_percentage=None):
     arm_command = arm_command_pb2.ArmCommand.Request(
         arm_joint_move_command=joint_move_command
     )
-    
+
     # Create the synchronized command
     if gripper_percentage is not None:
         # Use the simpler RobotCommandBuilder approach that's known to work
-        gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(gripper_percentage)
-        
+        gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(
+            gripper_percentage
+        )
+
         # Create synchronized command with both arm and gripper
         # For this to work correctly, we need to extract just the gripper command part
         # and create a new synchronized command that includes both
         sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
             arm_command=arm_command,
             # Use the gripper command from the builder but keep it separate
-            gripper_command=gripper_cmd.synchronized_command.gripper_command
+            gripper_command=gripper_cmd.synchronized_command.gripper_command,
         )
     else:
         # Arm command only
         sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
             arm_command=arm_command
         )
-        
+
     # Create the robot command
     return robot_command_pb2.RobotCommand(synchronized_command=sync_command)
 
@@ -122,19 +129,12 @@ def main():
     sdk = create_standard_sdk("SpotDemoPlayback")
     robot = sdk.create_robot(hostname)
     authenticate(robot)
-    
+
     # Ensure time sync client is created
     robot.time_sync.wait_for_sync()
-    
     command_client = robot.ensure_client(RobotCommandClient.default_service_name)
-    manipulation_api_client = robot.ensure_client(
-        ManipulationApiClient.default_service_name
-    )
     lease_client = robot.ensure_client(LeaseClient.default_service_name)
     lease_client.take()
-    lease_keepalive = LeaseKeepAlive(
-        lease_client, must_acquire=True, return_at_exit=True
-    )
 
     # Verify the robot is estopped
     from spot_utils.utils import verify_estop
@@ -144,40 +144,44 @@ def main():
     # Get the number of timesteps in the demo folder
     demo_path = f"demonstrations/{demo_folder_name}"
     timesteps = sorted([int(ts) for ts in os.listdir(demo_path) if ts.isdigit()])
-    
+
     if not timesteps:
         print(f"No timesteps found in {demo_path}")
         return
-    
+
     print(f"Found {len(timesteps)} timesteps in {demo_path}")
     print(f"First action buffer: {FIRST_ACTION_BUFFER}s")
-    
+
     # Set up for timestamp-based playback
     playback_start_time = time.time()
     last_robot_data = None
     last_execution_time = 0
     last_gripper_percentage = None
-    
+
     # Playback the demonstration data
     timestep_index = 0
     try:
         while timestep_index < len(timesteps):
             timestep = timesteps[timestep_index]
-            
+
             # Load the robot state from the pickle file
-            with open(
-                f"{demo_path}/{timestep}/robot_state.pkl", "rb"
-            ) as state_file:
+            with open(f"{demo_path}/{timestep}/robot_state.pkl", "rb") as state_file:
                 robot_data = pkl.load(state_file)
 
             # Get the timestamp of this data point
-            data_timestamp = robot_data.get("timestamp", timestep_index)  # Default to index if no timestamp
+            data_timestamp = robot_data.get(
+                "timestamp", timestep_index
+            )  # Default to index if no timestamp
 
             # Determine the delta time to use for trajectory timing
             if last_robot_data is not None:
-                last_data_timestamp = last_robot_data.get("timestamp", timestep_index - 1)
+                last_data_timestamp = last_robot_data.get(
+                    "timestamp", timestep_index - 1
+                )
                 if data_timestamp < last_data_timestamp:
-                    print(f"Warning: Data timestamp {data_timestamp} is less than last data timestamp {last_data_timestamp}. Skipping this timestep.")
+                    print(
+                        f"Warning: Data timestamp {data_timestamp} is less than last data timestamp {last_data_timestamp}. Skipping this timestep."
+                    )
                     timestep_index += 1
                     continue
                 # Calculate time difference between current and previous action
@@ -185,42 +189,49 @@ def main():
             else:
                 # First action uses the buffer time
                 delta_time = FIRST_ACTION_BUFFER
-            
+
             # Calculate how much time has passed in our playback
             current_playback_time = time.time() - playback_start_time
-            
+
             # If we're ahead of schedule, wait until it's time to execute this step
-            wait_point = last_execution_time + (0 if timestep_index == 0 else delta_time)
+            wait_point = last_execution_time + (
+                0 if timestep_index == 0 else delta_time
+            )
             if current_playback_time < wait_point:
                 wait_time = wait_point - current_playback_time
                 print(f"Waiting {wait_time:.2f}s for timestep {timestep}")
                 time.sleep(wait_time)
-            
+
             # Extract arm joint states
             arm_joint_state_list = robot_data["arm_joint_state"]
-            
+
             # Extract gripper state
             gripper_open_percentage = robot_data["gripper_open_percentage"]
-            
+
             # Check if gripper state has changed significantly
             gripper_to_send = None
-            if last_gripper_percentage is None or abs(gripper_open_percentage - last_gripper_percentage) > 0.02:
+            if (
+                last_gripper_percentage is None
+                or abs(gripper_open_percentage - last_gripper_percentage) > 0.02
+            ):
                 # Normalize the gripper percentage to a fraction between 0.0 and 1.0
                 gripper_fraction = min(max(gripper_open_percentage / 100.0, 0.0), 1.0)
                 gripper_to_send = gripper_fraction
-                print(f"Including gripper position {gripper_open_percentage:.2f}% (normalized to {gripper_fraction:.2f})")
+                print(
+                    f"Including gripper position {gripper_open_percentage:.2f}% (normalized to {gripper_fraction:.2f})"
+                )
                 last_gripper_percentage = gripper_open_percentage
-            
+
             # Now we need to extract the position value of each of the robot's joints.
             positions = {}
             velocities = {}
-            
+
             for joint in arm_joint_state_list:
                 if joint["name"] in ARM_JOINT_NAMES:
                     positions[joint["name"]] = joint["position"]
                     if "velocity" in joint:
                         velocities[joint["name"]] = joint["velocity"]
-            
+
             # If we have velocity data for all joints, use it to create a trajectory point with velocity
             if len(velocities) == len(ARM_JOINT_NAMES):
                 # Create a trajectory point with both position and velocity
@@ -231,7 +242,7 @@ def main():
                         el0=wrappers_pb2.DoubleValue(value=positions["arm0.el0"]),
                         el1=wrappers_pb2.DoubleValue(value=positions["arm0.el1"]),
                         wr0=wrappers_pb2.DoubleValue(value=positions["arm0.wr0"]),
-                        wr1=wrappers_pb2.DoubleValue(value=positions["arm0.wr1"])
+                        wr1=wrappers_pb2.DoubleValue(value=positions["arm0.wr1"]),
                     ),
                     velocity=arm_command_pb2.ArmJointVelocity(
                         sh0=wrappers_pb2.DoubleValue(value=velocities["arm0.sh0"]),
@@ -239,9 +250,9 @@ def main():
                         el0=wrappers_pb2.DoubleValue(value=velocities["arm0.el0"]),
                         el1=wrappers_pb2.DoubleValue(value=velocities["arm0.el1"]),
                         wr0=wrappers_pb2.DoubleValue(value=velocities["arm0.wr0"]),
-                        wr1=wrappers_pb2.DoubleValue(value=velocities["arm0.wr1"])
+                        wr1=wrappers_pb2.DoubleValue(value=velocities["arm0.wr1"]),
                     ),
-                    time_since_reference=seconds_to_duration(delta_time)
+                    time_since_reference=seconds_to_duration(delta_time),
                 )
                 print("Using velocity data for smoother trajectory")
             else:
@@ -254,31 +265,37 @@ def main():
                         positions["arm0.el1"],
                         positions["arm0.wr0"],
                         positions["arm0.wr1"],
-                        time_since_reference_secs=delta_time
+                        time_since_reference_secs=delta_time,
                     )
                 )
                 print("No velocity data available, using position-only trajectory")
-            
+
             # Create ArmJointTrajectory with points and velocity/acceleration limits
             # This makes motion smoother by constraining the maximum velocity and acceleration
             max_vel = wrappers_pb2.DoubleValue(value=3.0)  # rad/s
             max_acc = wrappers_pb2.DoubleValue(value=7.5)  # rad/s^2
-            
+
             arm_joint_traj = arm_command_pb2.ArmJointTrajectory(
                 points=[joint_trajectory_point],
                 maximum_velocity=max_vel,
-                maximum_acceleration=max_acc
+                maximum_acceleration=max_acc,
             )
-            
+
             # Create and send a combined command
-            combined_command = create_synchronized_command(arm_joint_traj, gripper_to_send)
-            cmd_id = command_client.robot_command(combined_command)
-            
+            combined_command = create_synchronized_command(
+                arm_joint_traj, gripper_to_send
+            )
+            _ = command_client.robot_command(combined_command)
+
             if gripper_to_send is not None:
-                print(f"Executed command for timestep {timestep} with arm movement and gripper position {gripper_to_send:.2f}")
+                print(
+                    f"Executed command for timestep {timestep} with arm movement and gripper position {gripper_to_send:.2f}"
+                )
             else:
-                print(f"Executed command for timestep {timestep} with arm movement only")
-            
+                print(
+                    f"Executed command for timestep {timestep} with arm movement only"
+                )
+
             # Update tracking variables
             last_execution_time = time.time() - playback_start_time
             timestep_index += 1
