@@ -17,6 +17,7 @@ setup(
         "types-PyYAML",
         "bosdyn-client >= 3.1",
         "opencv-python == 4.7.0.72",
+        "dill",
         "scipy",
     ],
     include_package_data=True,
