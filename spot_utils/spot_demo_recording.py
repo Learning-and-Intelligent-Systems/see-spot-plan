@@ -12,7 +12,6 @@ import time
 from rich import print
 import dill as pkl
 from bosdyn.client.image import ImageClient
-from bosdyn.client.time_sync import TimeSyncClient
 
 from spot_utils.utils import get_robot_state, verify_estop
 
@@ -47,10 +46,10 @@ def main():
     robot = sdk.create_robot(hostname)
     authenticate(robot)
     verify_estop(robot)
-    
+
     # Ensure time sync client is created
     robot.time_sync.wait_for_sync()
-    
+
     image_client = robot.ensure_client(ImageClient.default_service_name)
     camera_sources = [
         "frontleft_fisheye_image",
@@ -69,12 +68,12 @@ def main():
     try:
         timestep = 0
         start_time = time.time()  # Record the start time
-        
+
         while True:
             # Record the current timestamp relative to start
             current_time = time.time()
             relative_timestamp = current_time - start_time
-            
+
             # Make a folder corresponding to the current timestep.
             os.makedirs(
                 f"demonstrations/{demo_folder_name}/{timestep}",
@@ -103,13 +102,15 @@ def main():
                     "name": joint_state.name,
                     "position": joint_state.position.value,
                 }
-                
+
                 # Make sure velocity exists before accessing it
-                if joint_state.velocity is not None and hasattr(joint_state.velocity, 'value'):
+                if joint_state.velocity is not None and hasattr(
+                    joint_state.velocity, "value"
+                ):
                     joint_data["velocity"] = joint_state.velocity.value
                 else:
                     joint_data["velocity"] = 0.0  # Default to zero if no velocity data
-                
+
                 arm_joint_state_list.append(joint_data)
 
             # Get end-effector pose
@@ -177,10 +178,19 @@ def main():
             # Print information about the capture, including velocity data
             arm_joints = {joint["name"]: joint for joint in arm_joint_state_list}
             velocity_info = ""
-            for joint_name in ["arm0.sh0", "arm0.sh1", "arm0.el0", "arm0.el1", "arm0.wr0", "arm0.wr1"]:
+            for joint_name in [
+                "arm0.sh0",
+                "arm0.sh1",
+                "arm0.el0",
+                "arm0.el1",
+                "arm0.wr0",
+                "arm0.wr1",
+            ]:
                 if joint_name in arm_joints:
-                    velocity_info += f"{joint_name}: {arm_joints[joint_name]['velocity']:.3f} "
-            
+                    velocity_info += (
+                        f"{joint_name}: {arm_joints[joint_name]['velocity']:.3f} "
+                    )
+
             print(f"Saving data for timestep {timestep} at {relative_timestamp:.2f}s")
             print(f"Velocities: {velocity_info}")
 
