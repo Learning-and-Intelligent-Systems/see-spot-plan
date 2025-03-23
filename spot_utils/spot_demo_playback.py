@@ -8,7 +8,6 @@ import argparse
 import os
 import time
 
-from rich import print
 import dill as pkl
 from bosdyn.api import (
     arm_command_pb2,
@@ -21,6 +20,7 @@ from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.util import authenticate
 from bosdyn.util import seconds_to_duration
 from google.protobuf import wrappers_pb2
+from rich import print
 
 ARM_JOINT_NAMES = [
     "arm0.sh0",

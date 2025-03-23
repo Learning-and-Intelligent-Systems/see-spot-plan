@@ -9,10 +9,9 @@ import argparse
 import os
 import time
 
-from rich import print
 import dill as pkl
 from bosdyn.client.image import ImageClient
-
+from rich import print
 from spot_utils.utils import get_robot_state, verify_estop
 
 DATA_COLLECTION_INTERVAL = 1.0 / 4.0  # 10 Hz
@@ -170,6 +169,7 @@ def main():
                         "w": end_effector_pose.rotation.w,
                     },
                 },
+                "gripper_data": gripper_data,
                 "gripper_open_percentage": gripper_state,
                 "gripper_force": gripper_force,
                 "gripper_holding": gripper_holding,
