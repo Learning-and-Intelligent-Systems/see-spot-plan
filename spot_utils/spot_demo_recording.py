@@ -11,6 +11,7 @@ import time
 
 import dill as pkl
 from bosdyn.client.image import ImageClient
+from rich import print
 
 from spot_utils.utils import get_robot_state, verify_estop
 
@@ -117,10 +118,43 @@ def main():
                 "hand"
             ].parent_tform_child
 
-            # Get gripper open/close value
+            # Get gripper open/close value and force information
             gripper_state = robot_state.manipulator_state.gripper_open_percentage
 
-            # Add end-effector pose and gripper state to the dictionary
+            # Get gripper force information - look for various potential sources of force data
+            gripper_force = None
+            gripper_holding = False
+
+            # Check if we're currently holding something (gripper is closed and applying force)
+            if gripper_state < 0.2:  # Less than 20% open means mostly closed
+                gripper_holding = True
+
+            # Try to get estimated end effector force if available
+            if hasattr(
+                robot_state.manipulator_state, "estimated_end_effector_force_in_hand"
+            ):
+                force_in_hand = (
+                    robot_state.manipulator_state.estimated_end_effector_force_in_hand
+                )
+                gripper_force = {
+                    "x": force_in_hand.x,
+                    "y": force_in_hand.y,
+                    "z": force_in_hand.z,
+                    "magnitude": (
+                        force_in_hand.x**2 + force_in_hand.y**2 + force_in_hand.z**2
+                    )
+                    ** 0.5,
+                }
+                print(f"Recorded gripper force: {gripper_force['magnitude']:.2f} N")
+
+            # Record whether the gripper might be holding an object
+            gripper_data = {
+                "percentage": gripper_state,
+                "force": gripper_force,
+                "holding": gripper_holding,
+            }
+
+            # Add gripper information to the robot data
             robot_data = {
                 "arm_joint_state": arm_joint_state_list,
                 "end_effector_pose": {
@@ -136,8 +170,11 @@ def main():
                         "w": end_effector_pose.rotation.w,
                     },
                 },
+                "gripper_data": gripper_data,
                 "gripper_open_percentage": gripper_state,
-                "timestamp": relative_timestamp,  # Add the relative timestamp
+                "gripper_force": gripper_force,
+                "gripper_holding": gripper_holding,
+                "timestamp": relative_timestamp,
             }
 
             # Save the robot state to a pickle file

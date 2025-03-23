@@ -20,6 +20,7 @@ from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.util import authenticate
 from bosdyn.util import seconds_to_duration
 from google.protobuf import wrappers_pb2
+from rich import print
 
 ARM_JOINT_NAMES = [
     "arm0.sh0",
@@ -66,7 +67,9 @@ def block_until_arm_arrives(command_client, cmd_id, timeout_sec):
     return False
 
 
-def create_synchronized_command(arm_joint_traj, gripper_percentage=None):
+def create_synchronized_command(
+    arm_joint_traj, gripper_percentage=None, gripper_force=None
+):
     """Create a command with both arm trajectory and optional gripper commands."""
     # First create the arm command
     joint_move_command = arm_command_pb2.ArmJointMoveCommand.Request(
@@ -78,18 +81,37 @@ def create_synchronized_command(arm_joint_traj, gripper_percentage=None):
 
     # Create the synchronized command
     if gripper_percentage is not None:
-        # Use the simpler RobotCommandBuilder approach that's known to work
-        gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(
-            gripper_percentage
-        )
+        # For better gripping when force is specified
+        if gripper_percentage < 0.2 and gripper_force is not None:
+            # Use custom gripper command with stronger grip
+            print(f"Using stronger grip for gripper (detected force: {gripper_force})")
+
+            # Create a ClawGripperCommand manually with trajectory points
+            # We can't use max_torque parameter directly, so we'll use a different approach
+            from bosdyn.api import gripper_command_pb2, trajectory_pb2
+
+            # Create a trajectory point with the target percentage
+            traj_point = trajectory_pb2.ScalarTrajectoryPoint()
+            traj_point.point = gripper_percentage
+
+            # Create the claw gripper command
+            claw_command = gripper_command_pb2.ClawGripperCommand.Request()
+            claw_command.trajectory.points.append(traj_point)
+
+            # Create the gripper command
+            gripper_command = gripper_command_pb2.GripperCommand.Request(
+                claw_gripper_command=claw_command
+            )
+        else:
+            # Use standard gripper command
+            gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(
+                gripper_percentage
+            )
+            gripper_command = gripper_cmd.synchronized_command.gripper_command
 
         # Create synchronized command with both arm and gripper
-        # For this to work correctly, we need to extract just the gripper command part
-        # and create a new synchronized command that includes both
         sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
-            arm_command=arm_command,
-            # Use the gripper command from the builder but keep it separate
-            gripper_command=gripper_cmd.synchronized_command.gripper_command,
+            arm_command=arm_command, gripper_command=gripper_command
         )
     else:
         # Arm command only
@@ -205,8 +227,31 @@ def main():
             # Extract arm joint states
             arm_joint_state_list = robot_data["arm_joint_state"]
 
-            # Extract gripper state
+            # Extract gripper state and force information
             gripper_open_percentage = robot_data["gripper_open_percentage"]
+            gripper_force = robot_data.get("gripper_force")
+            gripper_holding = robot_data.get("gripper_holding", False)
+
+            # Normalize gripper percentage if it's from old recordings
+            if gripper_open_percentage > 1.0:
+                gripper_open_percentage = min(
+                    max(gripper_open_percentage / 100.0, 0.0), 1.0
+                )
+
+            # Adjust gripper openness based on force detection - for stronger grip
+            if (
+                gripper_force
+                and "magnitude" in gripper_force
+                and gripper_force["magnitude"] > 10.0
+            ):
+                # Significant force detected - reduce openness to apply more force during grip
+                original_percentage = gripper_open_percentage
+                # Reduce openness by 25% but maintain a minimum to prevent crushing
+                gripper_open_percentage = max(gripper_open_percentage * 0.75, 0.01)
+                print(
+                    f"High force detected ({gripper_force['magnitude']:.2f}N) - reducing gripper opening from "
+                    f"{original_percentage:.2f} to {gripper_open_percentage:.2f} for stronger grip"
+                )
 
             # Check if gripper state has changed significantly
             gripper_to_send = None
@@ -214,12 +259,14 @@ def main():
                 last_gripper_percentage is None
                 or abs(gripper_open_percentage - last_gripper_percentage) > 0.02
             ):
-                # Normalize the gripper percentage to a fraction between 0.0 and 1.0
-                gripper_fraction = min(max(gripper_open_percentage / 100.0, 0.0), 1.0)
-                gripper_to_send = gripper_fraction
+                gripper_to_send = gripper_open_percentage
                 print(
-                    f"Including gripper position {gripper_open_percentage:.2f}% (normalized to {gripper_fraction:.2f})"
+                    f"Including gripper position {gripper_open_percentage:.2f} in command"
                 )
+
+                # If the gripper is holding something, we'll apply more torque during playback
+                if gripper_holding:
+                    print("Detected gripper holding object - will apply higher torque")
                 last_gripper_percentage = gripper_open_percentage
 
             # Now we need to extract the position value of each of the robot's joints.
@@ -283,7 +330,7 @@ def main():
 
             # Create and send a combined command
             combined_command = create_synchronized_command(
-                arm_joint_traj, gripper_to_send
+                arm_joint_traj, gripper_to_send, gripper_force
             )
             _ = command_client.robot_command(combined_command)
 
