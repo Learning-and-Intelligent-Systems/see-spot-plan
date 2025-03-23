@@ -12,6 +12,7 @@ import time
 import dill as pkl
 from bosdyn.client.image import ImageClient
 from rich import print
+
 from spot_utils.utils import get_robot_state, verify_estop
 
 DATA_COLLECTION_INTERVAL = 1.0 / 4.0  # 10 Hz
