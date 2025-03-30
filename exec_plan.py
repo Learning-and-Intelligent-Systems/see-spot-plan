@@ -9,14 +9,14 @@ plan provided as input.
 
 import argparse
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy as np
 import yaml
 from bosdyn.client import create_standard_sdk, math_helpers
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.util import authenticate
-from numpy.typing import NDarray
+from numpy.typing import NDArray
 
 from skills.grasp import grasp_at_pixel
 from skills.spot_hand_move import (
@@ -52,7 +52,7 @@ grasp_offset = math_helpers.SE3Pose(0, 0, 0, math_helpers.Quat.from_pitch(np.pi 
 LOCALIZER = None
 ROBOT = None
 SAM_ENDPOINT = None
-SPOT_ROOM_POSE = None
+SPOT_ROOM_POSE: Dict[str, float] = dict()
 
 
 def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
@@ -119,7 +119,7 @@ def grasp(text_prompt: Optional[str]) -> None:
             grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
 
 
-def grasp_at_pose(X_RobEE: NDarray) -> None:
+def grasp_at_pose(X_RobEE: NDArray) -> None:
     """Grasp an object at a specified pose relative to the robot."""
     open_gripper(ROBOT)
     pose = math_helpers.SE3Pose(
@@ -133,7 +133,7 @@ def grasp_at_pose(X_RobEE: NDarray) -> None:
     move_hand_to_relative_pose(ROBOT, DEFAULT_HAND_LOOK_FLOOR_POSE)
 
 
-def place_at_pose(X_RobEE: NDarray) -> None:
+def place_at_pose(X_RobEE: NDArray) -> None:
     """Place an object at a specified pose relative to the robot."""
     pose = math_helpers.SE3Pose(
         x=X_RobEE[0],
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     init(args.hostname, args.map_name, args.sam_endpoint)
     with open(Path(args.map_name) / "metadata.yaml", "rb") as f:
-        metadata = yaml.load(f)
+        metadata = yaml.safe_load(f)
         SPOT_ROOM_POSE = metadata["spot-room-pose"]
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
