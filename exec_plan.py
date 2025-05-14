@@ -8,7 +8,6 @@ plan provided as input.
 """
 
 import argparse
-from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
@@ -77,7 +76,7 @@ def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
 
 
 def map_to_spot(pose: math_helpers.SE2Pose) -> math_helpers.SE2Pose:
-    """Convert from coordinates in the "room" frame, too spot coordinates."""
+    """Convert from coordinates in the "room" frame, to spot coordinates."""
     tf = math_helpers.SE2Pose(
         SPOT_ROOM_POSE["x"], SPOT_ROOM_POSE["y"], SPOT_ROOM_POSE["angle"]
     )
@@ -173,9 +172,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     init(args.hostname, args.map_name, args.sam_endpoint)
-    with open(Path(args.map_name) / "metadata.yaml", "rb") as f:
+    with open(get_graph_nav_dir(args.map_name) / "metadata.yaml", "rb") as f:
         metadata = yaml.safe_load(f)
-        SPOT_ROOM_POSE = metadata["spot-room-pose"]
+        if "spot-room-pose" in metadata.keys():
+            SPOT_ROOM_POSE = metadata["spot-room-pose"]
+        else:
+            print("spot-room-pose not found in metadata.yaml, using default val")
+            SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "z": 0.0}
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
     print("done")
