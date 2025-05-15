@@ -8,15 +8,21 @@ plan provided as input.
 """
 
 import argparse
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy as np
+import yaml
 from bosdyn.client import create_standard_sdk, math_helpers
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.util import authenticate
+from numpy.typing import NDArray
 
 from skills.grasp import grasp_at_pixel
-from skills.spot_hand_move import move_hand_to_relative_pose, open_gripper
+from skills.spot_hand_move import (
+    close_gripper,
+    move_hand_to_relative_pose,
+    open_gripper,
+)
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
@@ -40,9 +46,12 @@ direction_to_pose = {
     "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE,
 }
 
+grasp_offset = math_helpers.SE3Pose(0, 0, 0, math_helpers.Quat.from_pitch(np.pi / 2))
+
 LOCALIZER = None
 ROBOT = None
 SAM_ENDPOINT = None
+SPOT_ROOM_POSE: Dict[str, float] = dict()
 
 
 def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
@@ -50,7 +59,6 @@ def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
     global LOCALIZER
     global ROBOT
     global SAM_ENDPOINT
-
     sdk = create_standard_sdk("NavigationSkillTestClient")
     ROBOT = sdk.create_robot(hostname)
     authenticate(ROBOT)
@@ -67,11 +75,20 @@ def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
     SAM_ENDPOINT = endpoint_url
 
 
+def map_to_spot(pose: math_helpers.SE2Pose) -> math_helpers.SE2Pose:
+    """Convert from coordinates in the "room" frame, to spot coordinates."""
+    tf = math_helpers.SE2Pose(
+        SPOT_ROOM_POSE["x"], SPOT_ROOM_POSE["y"], SPOT_ROOM_POSE["angle"]
+    )
+    return tf.mult(pose)
+
+
 def move_to(x_abs: float, y_abs: float, yaw_abs: float) -> None:
     """Move the robot to the specified absolute pose."""
     desired_pose = math_helpers.SE2Pose(x=x_abs, y=y_abs, angle=yaw_abs)
+    desired_pose_spot = map_to_spot(desired_pose)
     if ROBOT is not None and LOCALIZER is not None:
-        navigate_to_absolute_pose(ROBOT, LOCALIZER, desired_pose)
+        navigate_to_absolute_pose(ROBOT, LOCALIZER, desired_pose_spot)
 
 
 def gaze(direction: str) -> None:
@@ -101,9 +118,31 @@ def grasp(text_prompt: Optional[str]) -> None:
             grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
 
 
-def _reset_hand() -> None:
+def grasp_at_pose(X_RobEE: NDArray) -> None:
+    """Grasp an object at a specified pose relative to the robot."""
     open_gripper(ROBOT)
-    gaze("DOWN")
+    pose = math_helpers.SE3Pose(
+        x=X_RobEE[0],
+        y=X_RobEE[1],
+        z=X_RobEE[2],
+        rot=math_helpers.Quat(X_RobEE[6], X_RobEE[3], X_RobEE[4], X_RobEE[5]),
+    )
+    move_hand_to_relative_pose(ROBOT, pose.mult(grasp_offset))
+    close_gripper(ROBOT)
+    move_hand_to_relative_pose(ROBOT, DEFAULT_HAND_LOOK_FLOOR_POSE)
+
+
+def place_at_pose(X_RobEE: NDArray) -> None:
+    """Place an object at a specified pose relative to the robot."""
+    pose = math_helpers.SE3Pose(
+        x=X_RobEE[0],
+        y=X_RobEE[1],
+        z=X_RobEE[2],
+        rot=math_helpers.Quat(X_RobEE[6], X_RobEE[3], X_RobEE[4], X_RobEE[5]),
+    )
+    move_hand_to_relative_pose(ROBOT, pose.mult(grasp_offset))
+    open_gripper(ROBOT)
+    move_hand_to_relative_pose(ROBOT, DEFAULT_HAND_LOOK_FLOOR_POSE)
 
 
 if __name__ == "__main__":
@@ -133,5 +172,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     init(args.hostname, args.map_name, args.sam_endpoint)
+    with open(get_graph_nav_dir(args.map_name) / "metadata.yaml", "rb") as f:
+        metadata = yaml.safe_load(f)
+        if "spot-room-pose" in metadata.keys():
+            SPOT_ROOM_POSE = metadata["spot-room-pose"]
+        else:
+            print("spot-room-pose not found in metadata.yaml, using default val")
+            SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "z": 0.0}
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
+    print("done")
