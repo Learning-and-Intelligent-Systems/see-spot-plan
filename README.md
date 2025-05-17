@@ -34,10 +34,6 @@ associated with a map. See below for more details.
 
 
 **Converting a map to a pointcloud**
-
-A challenging thing for the metadata is to define the points that yield `allowed-regions`.
-The following workflow is one way to make this relatively easy.
-
 1. Run [this script](https://github.com/boston-dynamics/spot-sdk/tree/master/python/examples/graph_nav_extract_point_cloud) on the pre-made map to yield an output `.ply` pointcloud file.
 [Optional]
 2. Install the [Open3D package](http://www.open3d.org/docs/release/getting_started.html) with `pip install open3d`.
