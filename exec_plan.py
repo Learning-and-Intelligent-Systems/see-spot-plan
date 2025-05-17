@@ -23,7 +23,9 @@ from skills.spot_hand_move import (
     move_hand_to_relative_pose,
     open_gripper,
 )
-from skills.spot_navigation import navigate_to_absolute_pose
+from skills.spot_navigation import (
+    navigate_to_absolute_pose_precise,
+)
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
 from spot_utils.utils import (
@@ -88,7 +90,9 @@ def move_to(x_abs: float, y_abs: float, yaw_abs: float) -> None:
     desired_pose = math_helpers.SE2Pose(x=x_abs, y=y_abs, angle=yaw_abs)
     desired_pose_spot = map_to_spot(desired_pose)
     if ROBOT is not None and LOCALIZER is not None:
-        navigate_to_absolute_pose(ROBOT, LOCALIZER, desired_pose_spot)
+        navigate_to_absolute_pose_precise(
+            ROBOT, LOCALIZER, desired_pose_spot, tolerance=0.015
+        )
 
 
 def gaze(direction: str) -> None:
@@ -178,7 +182,7 @@ if __name__ == "__main__":
             SPOT_ROOM_POSE = metadata["spot-room-pose"]
         else:
             print("spot-room-pose not found in metadata.yaml, using default val")
-            SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "z": 0.0}
+            SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "z": 0.0, "angle": 0.0}
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
     print("done")

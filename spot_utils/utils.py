@@ -168,3 +168,10 @@ def get_robot_gripper_open_percentage(robot: Robot) -> float:
     """Get the current state of how open the gripper is."""
     robot_state = get_robot_state(robot)
     return float(robot_state.manipulator_state.gripper_open_percentage)
+
+
+def get_se2_distance(pose1: math_helpers.SE2Pose, pose2: math_helpers.SE2Pose) -> float:
+    """Get the Euclidean distance between two SE2Poses, ignoring rotation."""
+    dx = pose2.x - pose1.x
+    dy = pose2.y - pose1.y
+    return (dx * dx + dy * dy) ** 0.5
