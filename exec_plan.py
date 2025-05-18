@@ -22,6 +22,7 @@ from skills.spot_hand_move import (
     close_gripper,
     move_hand_to_relative_pose,
     open_gripper,
+    stow_arm,
 )
 from skills.spot_navigation import (
     navigate_to_absolute_pose_precise,
@@ -183,6 +184,8 @@ if __name__ == "__main__":
         else:
             print("spot-room-pose not found in metadata.yaml, using default val")
             SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "z": 0.0, "angle": 0.0}
+    # Stow before running plan
+    stow_arm(ROBOT)
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
     print("done")
