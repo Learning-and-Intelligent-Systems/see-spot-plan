@@ -27,6 +27,7 @@ from skills.spot_hand_move import (
 from skills.spot_navigation import (
     navigate_to_absolute_pose_precise,
 )
+from spot_utils.gemini_utils import get_pixel_from_gemini
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
 from spot_utils.utils import (
@@ -35,6 +36,9 @@ from spot_utils.utils import (
     get_pixel_from_user,
     verify_estop,
 )
+import rerun as rr
+from PIL import Image
+import cv2
 
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
     x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
@@ -88,11 +92,12 @@ def map_to_spot(pose: math_helpers.SE2Pose) -> math_helpers.SE2Pose:
 
 def move_to(x_abs: float, y_abs: float, yaw_abs: float) -> None:
     """Move the robot to the specified absolute pose."""
+    print(f"move_to(x_abs={x_abs}, y_abs={y_abs}, yaw_abs={yaw_abs}")
     desired_pose = math_helpers.SE2Pose(x=x_abs, y=y_abs, angle=yaw_abs)
     desired_pose_spot = map_to_spot(desired_pose)
     if ROBOT is not None and LOCALIZER is not None:
         navigate_to_absolute_pose_precise(
-            ROBOT, LOCALIZER, desired_pose_spot, tolerance=0.015
+            ROBOT, LOCALIZER, desired_pose_spot, tolerance=0.05
         )
 
 
@@ -107,20 +112,43 @@ def grasp(text_prompt: Optional[str]) -> None:
     """Grasp an object at a specified pixel."""
     # Capture an image.
     camera = "hand_color_image"
-    if ROBOT is not None and LOCALIZER is not None:
-        rgbd = capture_images(ROBOT, LOCALIZER, [camera])[camera]
+    assert ROBOT is not None, "Sahit why!"
+    assert LOCALIZER is not None, "SAHIT WHY!!!!"
 
-        if text_prompt and SAM_ENDPOINT:
-            # Select a pixel by querying GroundedSAM.
-            pixel = get_pixel_from_grounded_sam(rgbd.rgb, text_prompt, SAM_ENDPOINT)
-        else:
-            # Select a pixel by querying the user.
-            pixel = get_pixel_from_user(rgbd.rgb)
+    images = capture_images(ROBOT, LOCALIZER, [camera])
+    rgbd = images[camera]
+    rgb_np = rgbd.rgb
+    rr.log("rgb_raw", rr.Image(rgb_np))
 
-        if pixel is not None:
-            # Grasp at the pixel with a top-down grasp.
-            top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
-            grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+    # FIXME: Don't do this!!! Hiding implementation
+    # if text_prompt and SAM_ENDPOINT:
+    #     # Select a pixel by querying GroundedSAM.
+    #     pixel = get_pixel_from_grounded_sam(rgbd.rgb, text_prompt, SAM_ENDPOINT)
+    # else:
+    #     # Select a pixel by querying the user.
+    #     pixel = get_pixel_from_user(rgbd.rgb)
+
+    # Call Gemini to point
+    vlm_query_template = f"""
+    Point to the {text_prompt}. If you cannot see the {text_prompt} fully, point to the best guess.
+    The answer should follow the json format: [{{"point": , "label": }}, ...]. The points are in [y, x] format normalized to 0-1000.
+    """
+    image_pil = Image.fromarray(rgb_np)
+    pixel = get_pixel_from_gemini(vlm_query_template, image_pil)
+
+    # Draw pixel on the image
+    bgr = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR)
+    cv2.circle(bgr, pixel, 5, (0, 0, 255), -1)
+    rgb_annotated = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    rr.log("pointing", rr.Image(rgb_annotated))
+
+    if pixel is not None:
+        # Grasp at the pixel with a top-down grasp.
+        top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
+        grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+        return
+    else:
+        raise RuntimeError("WTF. Grasp failed!")
 
 
 def grasp_at_pose(X_RobEE: NDArray) -> None:
@@ -153,6 +181,7 @@ def place_at_pose(X_RobEE: NDArray) -> None:
 if __name__ == "__main__":
     # running this script standalone initializes a bosdyn robot and localizer.
     # It then executes the list of commands provided in the plan file
+    rr.init("exec_plan", spawn=True)
     parser = argparse.ArgumentParser(description="Parse the robot's hostname.")
     parser.add_argument(
         "--hostname",
@@ -185,7 +214,25 @@ if __name__ == "__main__":
             print("spot-room-pose not found in metadata.yaml, using default val")
             SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "z": 0.0, "angle": 0.0}
     # Stow before running plan
+
+    # grasp("teddy bear")
     stow_arm(ROBOT)
+    # open_gripper(ROBOT)
+    # close_gripper(ROBOT)
+    # gaze("DOWN")
+    # move_to(x_abs=2.454116588554405, y_abs=-2.759339339399913, yaw_abs=-2.401609411896162)
+    # move_to(x_abs=2.542117893278808, y_abs=-0.752019696769485, yaw_abs=-1.933767708350784)
+    #
+    # move_to(x_abs=2.723552922357717, y_abs=-3.172621984462674, yaw_abs=-2.753087971468099)
+    # gaze("AHEAD")
+    # grasp("caterpillar")
+    #
+    # move_to(x_abs=4.471199645580120, y_abs=-3.217432928943325, yaw_abs=-0.023820034339159)
+    # place_at_pose([0.9594754639330341, 0.0, 0.09019530213554317, 0.0, 0.0, -0.18379480399141906, 0.9829646331510385])
+
+    # move_to(x_abs=4.483301381932474, y_abs=-3.486604871046227, yaw_abs=0.130814244458979)
+    # place_at_pose([0.8673816028445435, 0.0, -0.011952195088877238, 0.0, 0.0, 0.1621424933557064, 0.9867673544703406])
+    # print()
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
     print("done")
