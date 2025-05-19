@@ -11,3 +11,7 @@ __pycache__
 *.so
 demonstrations/*
 plan.txt
+
+# Jetbrains
+.idea/
+*.iml
