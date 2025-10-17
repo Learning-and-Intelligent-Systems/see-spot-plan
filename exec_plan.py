@@ -23,6 +23,7 @@ from skills.spot_hand_move import (
     move_hand_to_relative_pose,
     open_gripper,
 )
+from skills.wipe import wipe_multiple_strokes
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
@@ -52,6 +53,15 @@ LOCALIZER = None
 ROBOT = None
 SAM_ENDPOINT = None
 SPOT_ROOM_POSE: Dict[str, float] = dict()
+
+
+def np_pose_to_SE3(X_RobEE: NDArray) -> math_helpers.SE3Pose:
+    return math_helpers.SE3Pose(
+        X_RobEE[0],
+        X_RobEE[1],
+        X_RobEE[2],
+        rot=math_helpers.Quat(X_RobEE[6], X_RobEE[3], X_RobEE[4], X_RobEE[5]),
+    )
 
 
 def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
@@ -121,12 +131,7 @@ def grasp(text_prompt: Optional[str]) -> None:
 def grasp_at_pose(X_RobEE: NDArray) -> None:
     """Grasp an object at a specified pose relative to the robot."""
     open_gripper(ROBOT)
-    pose = math_helpers.SE3Pose(
-        x=X_RobEE[0],
-        y=X_RobEE[1],
-        z=X_RobEE[2],
-        rot=math_helpers.Quat(X_RobEE[6], X_RobEE[3], X_RobEE[4], X_RobEE[5]),
-    )
+    pose = np_pose_to_SE3(X_RobEE)
     move_hand_to_relative_pose(ROBOT, pose.mult(grasp_offset))
     close_gripper(ROBOT)
     move_hand_to_relative_pose(ROBOT, DEFAULT_HAND_LOOK_FLOOR_POSE)
@@ -134,15 +139,28 @@ def grasp_at_pose(X_RobEE: NDArray) -> None:
 
 def place_at_pose(X_RobEE: NDArray) -> None:
     """Place an object at a specified pose relative to the robot."""
-    pose = math_helpers.SE3Pose(
-        x=X_RobEE[0],
-        y=X_RobEE[1],
-        z=X_RobEE[2],
-        rot=math_helpers.Quat(X_RobEE[6], X_RobEE[3], X_RobEE[4], X_RobEE[5]),
-    )
+    pose = np_pose_to_SE3(X_RobEE)
     move_hand_to_relative_pose(ROBOT, pose.mult(grasp_offset))
     open_gripper(ROBOT)
     move_hand_to_relative_pose(ROBOT, DEFAULT_HAND_LOOK_FLOOR_POSE)
+
+
+def vertical_wipe(
+    X_RobEE_start: NDArray, stroke_dx: float, y_delta: float, num_strokes: int
+) -> None:
+    """Wipes a surface at a given pose with known height and width.."""
+    start_pose = np_pose_to_SE3(X_RobEE_start)
+    wipe_multiple_strokes(
+        ROBOT,
+        start_pose,
+        start_pose,
+        stroke_dx=stroke_dx,
+        stroke_dy=0,
+        delta_x_y_between_strokes=(0, y_delta),
+        num_strokes=num_strokes,
+        duration_per_stroke=3.0,
+        num_attempts_per_stroke=1,
+    )
 
 
 if __name__ == "__main__":
