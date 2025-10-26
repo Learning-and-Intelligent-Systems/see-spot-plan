@@ -43,46 +43,28 @@ from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 
 
 
-def move_hand_to_absolute_pose(
+def move_hand_to_absolute_pose_world(
     robot: Robot,
-    goal_pose_odom: math_helpers.SE3Pose,
+    localizer: SpotLocalizer,
+    goal_pose_world: math_helpers.SE3Pose,
 ) -> None:
     """
-    Move Spot's hand to an absolute pose expressed in odometry frame.
+    Move Spot's hand to an absolute pose expressed in world frame.
 
     Args:
         robot: Spot robot instance.
-        goal_pose_odom: Desired SE3Pose in odometry frame.
+        goal_pose_world: Desired SE3Pose in world frame.
     """
-    # Transform goal_pose into the robot's body frame
-    robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
-    robot_state = robot_state_client.get_robot_state()
+    localizer.localize()
 
-    # Compute the transform from goal_frame to body frame
-    body_tform_odom = get_a_tform_b(
-        robot_state.kinematic_state.transforms_snapshot,
-        BODY_FRAME_NAME,
-        ODOM_FRAME_NAME,
-    )
+    # Get transform from world -> body
+    world_T_body = localizer.get_last_robot_pose().inverse()  # SE3Pose: body_T_world.inverse() = world_T_body
 
-    # Apply the transform to get the pose relative to the body
-    goal_pose_body = body_tform_odom * goal_pose_odom
+    # Convert goal from world frame to body frame
+    goal_pose_body = world_T_body * goal_pose_world
 
     # Move the hand using the existing relative pose function
     move_hand_to_relative_pose(robot, goal_pose_body)
-
-
-def get_gripper_pose_odom(robot):
-    """Return Spot's hand pose as an SE3Pose in the odom frame."""
-    robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
-    state = robot_state_client.get_robot_state()
-
-    odom_tform_hand = get_a_tform_b(
-        state.kinematic_state.transforms_snapshot,
-        ODOM_FRAME_NAME,
-        HAND_FRAME_NAME,
-    )
-    return odom_tform_hand
 
 
 def pixels_to_world_points(
@@ -164,7 +146,7 @@ def grasp_orientation_from_normal(normal_vec: np.ndarray, world_up: np.ndarray =
     such that the gripper's +X axis points opposite the normal (toward the drawer).
 
     Args:
-        normal_vec: (3,) array, unit normal vector in world/odom frame.
+        normal_vec: (3,) array, unit normal vector in world frame.
         world_up: (3,) array, approximate unit vertical direction (default [0,0,1]).
 
     Returns:
@@ -175,7 +157,8 @@ def grasp_orientation_from_normal(normal_vec: np.ndarray, world_up: np.ndarray =
     # Construct y and z axes orthogonal to x
     y_axis = np.cross(world_up, x_axis)
     y_axis /= np.linalg.norm(y_axis)
-    z_axis = world_up
+    z_axis = np.cross(x_axis, y_axis)
+    z_axis /= np.linalg.norm(z_axis)
 
     # Rotation matrix (columns are body axes in world frame)
     R = np.column_stack((x_axis, y_axis, z_axis))
@@ -192,8 +175,8 @@ def compute_body_pose_in_front_of_drawer(drawer_point: np.ndarray,
     Compute a 2D pose (x, y, yaw) for Spot's body to face the drawer.
 
     Args:
-        drawer_point: (3,) world/odom coordinates of a point on the drawer surface.
-        drawer_normal: (3,) world/odom unit normal vector pointing out of the drawer.
+        drawer_point: (3,) world coordinates of a point on the drawer surface.
+        drawer_normal: (3,) world unit normal vector pointing out of the drawer.
         standoff_dist: distance to stand off from the drawer surface (m).
 
     Returns:
@@ -294,7 +277,9 @@ def get_multiple_pixels_from_gemini(
 def open_drawer(
     robot: Robot,
     localizer: SpotLocalizer,
+    body_height_offset: float = 0.0,
     retreat_offset: float = 0.1,
+    checkpoint: int = 7,
 ) -> None:
     """
     Reach toward a drawer handle, close the gripper to grasp it, 
@@ -317,7 +302,7 @@ def open_drawer(
     # Get a 2D pixel on the handle, and convert to 3D point
     handle_pixel = get_pixel_from_gemini(prompt_get_handle_pixel, image_pil)
     handle_3d_point = pixels_to_world_points([handle_pixel], rgbd)[0]
-        
+    
     # Get pixels on surface of drawer via SAM (try just Gemini first, get 15 pixels on front of drawer)
     front_surface_pixels = get_multiple_pixels_from_gemini(prompt_get_drawer_surface_pixel, image_pil, 15)
 
@@ -333,37 +318,46 @@ def open_drawer(
     # ACTION: Move Spot's body to be aligned to the front of the drawer normal FIRST
     body_target_pose = compute_body_pose_in_front_of_drawer(handle_3d_point, normal_vector, standoff_dist=0.8)
     navigate_to_absolute_pose(robot, localizer, body_target_pose)
+    if checkpoint == 1:
+        return
 
     # ACTION: Adjust Spot's height up and down depending on comfortable grasping position, find this param
-    set_body_height(robot, 0.0)
-
-    # TODO: Potentially change all frames to vision frame or world frame instead of odom
+    set_body_height(robot, body_height_offset)
+    if checkpoint == 2:
+        return
 
     # ACTION: Open gripper
     open_gripper(robot)
+    if checkpoint == 3:
+        return
 
     # ACTION: Grasp at pixel on handle
     grasp_at_pixel(robot, rgbd, handle_pixel, grasp_rot, move_while_grasping=False)
-
-    # ACTION: Get grasp pose of gripper
-    grasp_pose = get_gripper_pose_odom(robot)
-
+    if checkpoint == 4:
+        return
+    
     # Compute retreat pose along normal vector
     offset_vec = normal_vector * retreat_offset
     retreat_pose = math_helpers.SE2Pose(
         body_target_pose.x + offset_vec[0],
-        grasp_pose.y + offset_vec[1],
-        grasp_pose.angle
+        body_target_pose.y + offset_vec[1],
+        body_target_pose.angle
     )
 
     # ACTION: Walk backwards to open drawer
     navigate_to_absolute_pose(robot, localizer, retreat_pose)
+    if checkpoint == 5:
+        return
 
     # ACTION: Open gripper
     open_gripper(robot)
+    if checkpoint == 6:
+        return
 
     # ACTION: Stow arm
     stow_arm(robot)
+    if checkpoint == 7:
+        return
     
 
 prompt_get_handle_pixel = """
@@ -423,7 +417,7 @@ if __name__ == "__main__":
     # --- Run open_drawer routine ---
     try:
         print("[INFO] Running open_drawer()...")
-        open_drawer(robot, localizer, 0.1)
+        open_drawer(robot, localizer, body_height_offset=0.0, retreat_offset=0.1, checkpoint=1)
     except Exception as e:
         print(f"[ERROR] open_drawer() failed: {e}")
     finally:
