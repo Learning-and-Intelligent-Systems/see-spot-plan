@@ -32,17 +32,20 @@ from google.protobuf.wrappers_pb2 import (
     DoubleValue,  # pylint: disable=no-name-in-module
 )
 
-from spot_utils.utils import verify_estop, get_pixel_from_gemini, get_graph_nav_dir
+from spot_utils.utils import verify_estop, get_graph_nav_dir
+from spot_utils.gemini_utils import get_pixel_from_gemini
 from spot_utils.perception.perception_structs import RGBDImageWithContext
 from skills.grasp import grasp_at_pixel
 from skills.spot_navigation import navigate_to_absolute_pose
 from skills.spot_hand_move import move_hand_to_relative_pose, open_gripper, close_gripper, stow_arm
+# from grasp import grasp_at_pixel
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
 from spot_utils.pretrained_model_interface import GoogleGeminiVLM
+from exec_plan import direction_to_pose, gaze
 
 
-
+# this is currently unused
 def move_hand_to_absolute_pose_world(
     robot: Robot,
     localizer: SpotLocalizer,
@@ -274,9 +277,29 @@ def get_multiple_pixels_from_gemini(
     return pixels
 
 
+DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
+)
+
+DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
+)
+
+direction_to_pose = {
+    "DOWN": DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE,
+    "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE,
+}
+
+def gaze(robot, direction: str) -> None:
+    """Move the hand to look in a certain direction."""
+    look_pose = direction_to_pose[direction]
+    move_hand_to_relative_pose(robot, look_pose)
+    open_gripper(robot)
+
 def open_drawer(
     robot: Robot,
     localizer: SpotLocalizer,
+    standoff_dist: float = 0.8,
     body_height_offset: float = 0.0,
     retreat_offset: float = 0.1,
     checkpoint: int = 7,
@@ -290,6 +313,13 @@ def open_drawer(
         approach_offset: Distance (m) to stop before touching the handle.
         timeout: Seconds to allow for each arm motion.
     """
+    # Gaze at drawer ahead
+    # gaze(direction_to_pose["AHEAD"])
+    # open_gripper(robot)
+    stow_arm(robot)
+    gaze(robot, "AHEAD")
+    if checkpoint == 0:
+        return
 
     # Capture RGBD image from Spot hand camera
     rgbds = capture_images(robot, localizer, camera_names=["hand_color_image"])
@@ -316,7 +346,7 @@ def open_drawer(
     grasp_rot = grasp_orientation_from_normal(normal_vector)
 
     # ACTION: Move Spot's body to be aligned to the front of the drawer normal FIRST
-    body_target_pose = compute_body_pose_in_front_of_drawer(handle_3d_point, normal_vector, standoff_dist=0.8)
+    body_target_pose = compute_body_pose_in_front_of_drawer(handle_3d_point, normal_vector, standoff_dist)
     navigate_to_absolute_pose(robot, localizer, body_target_pose)
     if checkpoint == 1:
         return
@@ -387,7 +417,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--map_name",
         type=str,
-        required=True,
+        required=False,
         help="The name of the map folder to load (sub-folder under graph_nav_maps)",
     )
     args = parser.parse_args()
@@ -417,9 +447,9 @@ if __name__ == "__main__":
     # --- Run open_drawer routine ---
     try:
         print("[INFO] Running open_drawer()...")
-        open_drawer(robot, localizer, body_height_offset=0.0, retreat_offset=0.1, checkpoint=1)
+        open_drawer(robot, localizer, standoff_dist=0.8, body_height_offset=0.0, retreat_offset=0.1, checkpoint=0)
     except Exception as e:
         print(f"[ERROR] open_drawer() failed: {e}")
-    finally:
-        lease_keepalive.shutdown()
-        print("[INFO] Lease returned, exiting cleanly.")
+    # finally:
+    #     lease_keepalive.shutdown()
+    #     print("[INFO] Lease returned, exiting cleanly.")
