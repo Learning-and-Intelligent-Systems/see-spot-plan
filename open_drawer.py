@@ -7,6 +7,7 @@ from PIL import Image
 import json
 from typing import Tuple
 
+import open3d as o3d
 from bosdyn.api import (
     arm_command_pb2,
     manipulation_api_pb2,
@@ -18,7 +19,7 @@ from bosdyn.client.image import ImageClient
 import cv2
 from numpy.typing import NDArray
 from bosdyn.client import math_helpers
-from bosdyn.client.frame_helpers import BODY_FRAME_NAME, ODOM_FRAME_NAME, HAND_FRAME_NAME, get_a_tform_b
+from bosdyn.client.frame_helpers import BODY_FRAME_NAME, ODOM_FRAME_NAME, HAND_FRAME_NAME, get_a_tform_b, VISION_FRAME_NAME, get_se2_a_tform_b
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import (
     RobotCommandBuilder,
@@ -32,11 +33,11 @@ from google.protobuf.wrappers_pb2 import (
     DoubleValue,  # pylint: disable=no-name-in-module
 )
 
-from spot_utils.utils import verify_estop, get_graph_nav_dir
+from spot_utils.utils import verify_estop, get_graph_nav_dir, get_robot_state
 from spot_utils.gemini_utils import get_pixel_from_gemini
 from spot_utils.perception.perception_structs import RGBDImageWithContext
 from skills.grasp import grasp_at_pixel
-from skills.spot_navigation import navigate_to_absolute_pose
+from skills.spot_navigation import navigate_to_relative_pose
 from skills.spot_hand_move import move_hand_to_relative_pose, open_gripper, close_gripper, stow_arm
 # from grasp import grasp_at_pixel
 from spot_utils.perception.spot_cameras import capture_images
@@ -44,94 +45,145 @@ from spot_utils.spot_localization import SpotLocalizer
 from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 from exec_plan import direction_to_pose, gaze
 
+import rerun as rr
 
-# this is currently unused
-def move_hand_to_absolute_pose_world(
-    robot: Robot,
-    localizer: SpotLocalizer,
-    goal_pose_world: math_helpers.SE3Pose,
-) -> None:
-    """
-    Move Spot's hand to an absolute pose expressed in world frame.
+def move_hand_back(robot, dx):
+    robot_state_client = robot.ensure_client('robot-state')
+    state = robot_state_client.get_robot_state()
 
-    Args:
-        robot: Spot robot instance.
-        goal_pose_world: Desired SE3Pose in world frame.
-    """
-    localizer.localize()
-
-    # Get transform from world -> body
-    world_T_body = localizer.get_last_robot_pose().inverse()  # SE3Pose: body_T_world.inverse() = world_T_body
-
-    # Convert goal from world frame to body frame
-    goal_pose_body = world_T_body * goal_pose_world
-
-    # Move the hand using the existing relative pose function
-    move_hand_to_relative_pose(robot, goal_pose_body)
+    # Get hand pose relative to body
+    body_T_hand = get_a_tform_b(state.kinematic_state.transforms_snapshot,
+                                BODY_FRAME_NAME,
+                                HAND_FRAME_NAME)
+    
+    hand_offset_T_hand = math_helpers.SE3Pose(-dx, 0, 0, math_helpers.Quat())
+    body_T_new_hand = body_T_hand * hand_offset_T_hand
+    move_hand_to_relative_pose(robot, body_T_new_hand)
 
 
-def pixels_to_world_points(
+def pixels_to_vision_points(
     pixels: list[tuple[int, int]],
     rgbd: RGBDImageWithContext,
 ) -> NDArray[np.float64]:
     """
-    Convert 2D pixels (u, v) to 3D points (X, Y, Z) in the world frame.
+    Convert 2D pixels (u, v) to 3D points (X, Y, Z) in vision frame.
 
     Args:
         pixels: list of (u, v) pixel coordinates
         rgbd: an RGBDImageWithContext instance from Spot's capture_images()
 
     Returns:
-        Nx3 array of 3D points in world frame (in meters)
+        Nx3 array of 3D points in vision frame (in meters)
     """
+
+    vision_T_camera = get_a_tform_b(
+        rgbd.transforms_snapshot,
+        VISION_FRAME_NAME,
+        rgbd.frame_name_image_sensor
+    )
+
     depth_img = rgbd.depth
+    # print(depth_img)
+    # print(np.unique(depth_img))
+    # depth_image = Image.fromarray(depth_img)
+    # depth_image.save("depth_hand_camera_output.png") 
+    depth_m = depth_img.astype(np.float32)
+    if depth_img.dtype == np.uint16:
+        depth_m = depth_m / 1000.0
     depth_scale = rgbd.depth_scale
-    cam_model = rgbd.camera_model
-    world_T_cam = rgbd.world_tform_camera  # SE3Pose
+    cam_model = rgbd.camera_model  
 
     fx = cam_model.intrinsics.focal_length.x
     fy = cam_model.intrinsics.focal_length.y
     cx = cam_model.intrinsics.principal_point.x
     cy = cam_model.intrinsics.principal_point.y
 
-    points_world = []
+    print(f"Intrinsics : {fx, fy, cx, cy}")
+    print(f"Depth scale : {depth_scale}")
+
+    pts = []
     for (u, v) in pixels:
-        # Get depth (skip invalid or zero)
-        depth = depth_img[int(v), int(u)] * depth_scale
-        if depth <= 0:
+        if v < 0 or v >= depth_m.shape[0] or u < 0 or u >= depth_m.shape[1]:
             continue
 
-        # Back-project to camera frame
-        x_cam = (u - cx) * depth / fx
-        y_cam = (v - cy) * depth / fy
-        z_cam = depth
-        point_cam = np.array([x_cam, y_cam, z_cam, 1.0])
+        z = float(depth_m[v, u])
+        # We filter out points further than 2 meters away
+        if z <= 0 or z > 2.0:
+            continue
 
-        # Transform to world frame
-        point_world = world_T_cam.to_matrix() @ point_cam
-        points_world.append(point_world[:3])
+        x = (float(u) - cx) / fx * z
+        y = (float(v) - cy) / fy * z
+        pts.append([x, y, z, 1.0])
 
-    return np.array(points_world)
+    pts_cam = np.array(pts).T  # shape 4xN
+
+    # 3. Transform to vision frame
+    pts_vision = (vision_T_camera.to_matrix() @ pts_cam).T[:, :3]  # Nx3
+    return np.asarray(pts_vision, dtype=np.float32)
+
+    # return np.asarray(pts, dtype=np.float32)[:, :3]
 
 
-def fit_plane_to_points(points_world: NDArray[np.float64]):
+def debug_pixels_to_vision_points(
+    pixels: list[tuple[int, int]],
+    rgb_image: np.ndarray, 
+    depth_image: np.ndarray, 
+    intrinsics: np.ndarray, 
+    ) -> NDArray[np.float64]:
+    """
+    Convert 2D pixels (u, v) to 3D points (X, Y, Z) in vision frame.
+
+    Args:
+        pixels: list of (u, v) pixel coordinates
+        rgbd: an RGBDImageWithContext instance from Spot's capture_images()
+
+    Returns:
+        Nx3 array of 3D points in vision frame (in meters)
+    """
+
+    if depth_image.ndim == 3:
+        depth_image = cv2.cvtColor(depth_image, cv2.COLOR_BGR2GRAY)
+    depth_m = depth_image.astype(np.float32)
+    if depth_image.dtype == np.uint16:
+        depth_m = depth_m / 1000.0
+
+    fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+
+    pts = []
+    for (u, v) in pixels:
+        if v < 0 or v >= depth_m.shape[0] or u < 0 or u >= depth_m.shape[1]:
+            continue
+
+        z = float(depth_m[v, u])
+        # We filter out points further than 2 meters away
+        if z <= 0 or z > 2.0:
+            continue
+
+        x = (float(u) - cx) / fx * z
+        y = (float(v) - cy) / fy * z
+        pts.append([x, y, z])
+
+    return np.asarray(pts, dtype=np.float32)
+
+
+def fit_plane_to_points(points_vision: NDArray[np.float64]):
     """
     Fit a plane to 3D points and return its centroid and normal vector.
 
     Args:
-        points_world: Nx3 array of 3D points (in world frame)
+        points_vision: Nx3 array of 3D points (in vision frame)
 
     Returns:
         centroid: (3,) array, mean position of points
         normal: (3,) array, unit normal vector of best-fit plane
     """
-    assert points_world.shape[1] == 3, "Points must be Nx3"
+    assert points_vision.shape[1] == 3, "Points must be Nx3"
 
     # Compute centroid
-    centroid = np.mean(points_world, axis=0)
+    centroid = np.mean(points_vision, axis=0)
 
     # Subtract centroid
-    Q = points_world - centroid
+    Q = points_vision - centroid
 
     # Compute covariance and its eigenvectors
     _, _, vh = np.linalg.svd(Q)  # SVD is numerically stable
@@ -139,6 +191,9 @@ def fit_plane_to_points(points_world: NDArray[np.float64]):
 
     # Normalize
     normal /= np.linalg.norm(normal)
+
+    if normal[0] < 0:
+        normal = -normal
 
     return centroid, normal
 
@@ -149,8 +204,8 @@ def grasp_orientation_from_normal(normal_vec: np.ndarray, world_up: np.ndarray =
     such that the gripper's +X axis points opposite the normal (toward the drawer).
 
     Args:
-        normal_vec: (3,) array, unit normal vector in world frame.
-        world_up: (3,) array, approximate unit vertical direction (default [0,0,1]).
+        normal_vec: (3,) array, unit normal vector in vision frame.
+        world_up: (3,) array, unit vertical direction (default [0,0,1]) (assume vision frame z axis is roughly this)
 
     Returns:
         math_helpers.Quat representing the grasp orientation.
@@ -163,7 +218,7 @@ def grasp_orientation_from_normal(normal_vec: np.ndarray, world_up: np.ndarray =
     z_axis = np.cross(x_axis, y_axis)
     z_axis /= np.linalg.norm(z_axis)
 
-    # Rotation matrix (columns are body axes in world frame)
+    # Rotation matrix (columns are body axes in vision frame)
     R = np.column_stack((x_axis, y_axis, z_axis))
 
     # Convert rotation matrix to quaternion
@@ -178,8 +233,8 @@ def compute_body_pose_in_front_of_drawer(drawer_point: np.ndarray,
     Compute a 2D pose (x, y, yaw) for Spot's body to face the drawer.
 
     Args:
-        drawer_point: (3,) world coordinates of a point on the drawer surface.
-        drawer_normal: (3,) world unit normal vector pointing out of the drawer.
+        drawer_point: (3,) coordinates of a point on the drawer surface in vision frame.
+        drawer_normal: (3,) unit normal vector pointing out of the drawer in vision frame.
         standoff_dist: distance to stand off from the drawer surface (m).
 
     Returns:
@@ -189,9 +244,25 @@ def compute_body_pose_in_front_of_drawer(drawer_point: np.ndarray,
     body_pos = drawer_point + drawer_normal * standoff_dist
 
     # Compute yaw angle so body faces *toward* the drawer (along +normal)
-    yaw = np.arctan2(drawer_normal[1], drawer_normal[0]) + np.pi  # face opposite normal
+    yaw = np.arctan2(-drawer_normal[1], -drawer_normal[0])  # face opposite normal
 
     return math_helpers.SE2Pose(body_pos[0], body_pos[1], yaw)
+
+def compute_rotated_body_pose(robot: Robot, normal_vector: Tuple[float, float]) -> math_helpers.SE2Pose:
+    """
+    Rotate Spot's body to align with opposite of normal vector.
+    """
+    robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
+    state = robot_state_client.get_robot_state()
+    vision_T_body = get_a_tform_b(state.kinematic_state.transforms_snapshot,
+                              VISION_FRAME_NAME,
+                              BODY_FRAME_NAME)
+    x = vision_T_body.x
+    y = vision_T_body.y
+    yaw = np.arctan2(-normal_vector[1], -normal_vector[0])
+    se2 = vision_T_body.get_closest_se2_transform()
+    print("CURRENT POSE: ", math_helpers.SE2Pose(x, y, se2.angle))
+    return math_helpers.SE2Pose(x, y, yaw)
 
 
 def set_body_height(robot, height_offset_m: float):
@@ -214,12 +285,28 @@ def set_body_height(robot, height_offset_m: float):
     command_client.robot_command(cmd)
 
 
+def navigate_to_vision_goal(robot, vision_tform_goal: math_helpers.SE2Pose):
+    # 1. Get the current robot transforms
+    robot_state = get_robot_state(robot)
+    transforms = robot_state.kinematic_state.transforms_snapshot
+
+    # 2. Get current body pose in the vision frame
+    vision_tform_body = get_se2_a_tform_b(transforms, VISION_FRAME_NAME, BODY_FRAME_NAME)
+
+    # 3. Compute desired relative motion in body frame
+    # body_T_goal = body^-1 * (vision^-1 * goal)
+    body_tform_goal = vision_tform_body.inverse() * vision_tform_goal
+
+    # 4. Command robot to move by that relative transform
+    navigate_to_relative_pose(robot, body_tform_goal)
+
+
 def get_multiple_pixels_from_gemini(
     vlm_query_str: str, pil_image: Image, num_pixels: int = 15
 ) -> list[Tuple[int, int]]:
     # Assuming create_vlm_by_name exists and works like create_llm_by_name
     # Use the specific model name from CFG or hardcode if necessary
-    vlm = GoogleGeminiVLM("gemini-1.5-flash")
+    vlm = GoogleGeminiVLM("gemini-2.0-flash")
 
     # 2. Construct the query
     # Adjust prompt as needed for better VLM performance
@@ -274,20 +361,38 @@ def get_multiple_pixels_from_gemini(
         y = max(0, min(y, img_height - 1))
         x = max(0, min(x, img_width - 1))
         pixels.append((x, y))
+    
+    # print(pixels)
     return pixels
 
 
+def draw_colored_pixels(image_pil: Image, pixels: list[Tuple[int, int]], path: str, color: str):
+    pixels_obj = image_pil.load()
+    for pixel in pixels:
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                px = min(max(pixel[0] + dx, 0), image_pil.width - 1)
+                py = min(max(pixel[1] + dy, 0), image_pil.height - 1)
+                pixels_obj[px, py] = (255, 0, 0) if color == "red" else (0, 0, 255)
+    image_pil.save(path)
+
+
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
+    x=0.80, y=0.0, z=-0.15, rot=math_helpers.Quat.from_pitch(0)
 )
 
 DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
     x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
 )
 
+DEFAULT_HAND_LOOK_INTO_POSE = math_helpers.SE3Pose(
+    x=0.80, y=0.0, z=0.3, rot=math_helpers.Quat.from_pitch(np.pi / 4)
+)
+
 direction_to_pose = {
     "DOWN": DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE,
     "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE,
+    "INTO": DEFAULT_HAND_LOOK_INTO_POSE
 }
 
 def gaze(robot, direction: str) -> None:
@@ -295,6 +400,61 @@ def gaze(robot, direction: str) -> None:
     look_pose = direction_to_pose[direction]
     move_hand_to_relative_pose(robot, look_pose)
     open_gripper(robot)
+
+def debug_gemini_pixels(rgb_image_path):
+    
+    image_pil = Image.open(rgb_image_path)
+
+    front_surface_pixels = get_multiple_pixels_from_gemini(prompt_get_drawer_surface_pixel, image_pil, 15)
+    print(front_surface_pixels)
+
+def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
+    rgb = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
+    depth = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
+
+    if rgb is None:
+        raise FileNotFoundError(f"Could not read RGB image at: {rgb_image_path}")
+    if depth is None:
+        raise FileNotFoundError(f"Could not read depth image at: {depth_image_path}")
+
+    # Ensure single-channel depth
+    if depth.ndim == 3:
+        depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
+
+    # Convert depth to meters if given as uint16 millimeters
+    if depth.dtype == np.uint16:
+        depth_m = depth.astype(np.float32) / 1000.0
+    else:
+        depth_m = depth.astype(np.float32)
+
+    h, w = depth_m.shape
+    if rgb.shape[:2] != (h, w):
+        rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+
+    # Create pixel grid
+    u_coords, v_coords = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+
+    z = depth_m
+    valid = (z > 0) & (z <= 2.0)
+
+    x = (u_coords - cx) / fx * z
+    y = (v_coords - cy) / fy * z
+
+    # Stack and mask
+    points = np.stack((x, y, z), axis=-1)[valid]
+
+    # Colors: convert BGR (cv2) to RGB and normalize to [0,1]
+    rgb_rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+    colors = (rgb_rgb.reshape(-1, 3)[valid.ravel()] / 255.0).astype(np.float32)
+
+    # Build Open3D point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
+    pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
+
+    return pcd
 
 def open_drawer(
     robot: Robot,
@@ -316,38 +476,74 @@ def open_drawer(
     # Gaze at drawer ahead
     # gaze(direction_to_pose["AHEAD"])
     # open_gripper(robot)
-    stow_arm(robot)
+    # stow_arm(robot)
+
     gaze(robot, "AHEAD")
-    if checkpoint == 0:
-        return
 
     # Capture RGBD image from Spot hand camera
     rgbds = capture_images(robot, localizer, camera_names=["hand_color_image"])
     rgbd = rgbds["hand_color_image"]
+    # rgbd=None
 
     # Extract RGB image
     rgb = rgbd.rgb
+    depth = rgbd.depth
+    depth_pil = Image.fromarray(depth)
+    depth_pil.save("raw_hand_camera_depth.png")
+    rr.log("drawer_rgb", rr.Image(rgb))
     image_pil = Image.fromarray(rgb)
+    image_pil.save("raw_hand_camera_output.jpg") 
+    # image_pil = Image.open("raw_hand_camera_output.jpg")
+    # image_pil = image_pil.convert("RGB")
 
     # Get a 2D pixel on the handle, and convert to 3D point
     handle_pixel = get_pixel_from_gemini(prompt_get_handle_pixel, image_pil)
-    handle_3d_point = pixels_to_world_points([handle_pixel], rgbd)[0]
+    draw_colored_pixels(image_pil, [handle_pixel], "annotated_hand_camera_output.jpg", "red")
+    rr.log("drawer_pixels", rr.Image(np.array(image_pil)))
+    
+    # cam_model = rgbd.camera_model  
+
+    # fx = cam_model.intrinsics.focal_length.x
+    # fy = cam_model.intrinsics.focal_length.y
+    # cx = cam_model.intrinsics.principal_point.x
+    # cy = cam_model.intrinsics.principal_point.y
+
+    # intrinsics = [fx, fy, cx, cy]
+
+    # rgb_image_path = "raw_hand_camera_output.jpg"
+    # depth_image_path = "raw_hand_camera_depth.png"
+    # pcd = get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics)
+
+    handle_3d_point = pixels_to_vision_points([handle_pixel], rgbd)[0]
+    print("HANDLE 3D POINT IS: ", handle_3d_point)
+    # voxel_size = 0.05
+    # rr.log("3D points", rr.Points3D(positions=pcd.points, colors=pcd.colors, radii=voxel_size/2))
     
     # Get pixels on surface of drawer via SAM (try just Gemini first, get 15 pixels on front of drawer)
     front_surface_pixels = get_multiple_pixels_from_gemini(prompt_get_drawer_surface_pixel, image_pil, 15)
+    draw_colored_pixels(image_pil, front_surface_pixels, "annotated_hand_camera_output.jpg", "blue")
+    if checkpoint == 0:
+        return
 
     # Convert to 3D points on surface of drawer
-    front_surface_3d_points = pixels_to_world_points(front_surface_pixels, rgbd)
+    front_surface_3d_points = pixels_to_vision_points(front_surface_pixels, rgbd)
+    rr.log("surface_points", rr.Points3D(front_surface_3d_points))
+    print("FRONT SURFACE 3D POINTS ARE: ",front_surface_3d_points)
 
     # Fit a plane to those points via SVD and get normal vector
     _, normal_vector = fit_plane_to_points(front_surface_3d_points)
+    print("NORMAL VECTOR IS: ",normal_vector)
 
     # Compute approach grasp pose, aligned to normal
     grasp_rot = grasp_orientation_from_normal(normal_vector)
 
     # ACTION: Move Spot's body to be aligned to the front of the drawer normal FIRST
+    rotated_body_pose = compute_rotated_body_pose(robot, normal_vector)
+    print("ROTATED POSE IS: ", rotated_body_pose)
+    # navigate_to_vision_goal(robot, rotated_body_pose)
     body_target_pose = compute_body_pose_in_front_of_drawer(handle_3d_point, normal_vector, standoff_dist)
-    navigate_to_absolute_pose(robot, localizer, body_target_pose)
+    print("BODY POSE IS: ", body_target_pose)
+    navigate_to_vision_goal(robot, body_target_pose)
     if checkpoint == 1:
         return
 
@@ -357,25 +553,25 @@ def open_drawer(
         return
 
     # ACTION: Open gripper
-    open_gripper(robot)
-    if checkpoint == 3:
-        return
+    # open_gripper(robot)
+    # if checkpoint == 3:
+    #     return
 
     # ACTION: Grasp at pixel on handle
-    grasp_at_pixel(robot, rgbd, handle_pixel, grasp_rot, move_while_grasping=False)
+    grasp_at_pixel(robot, rgbd, handle_pixel, move_while_grasping=False)
     if checkpoint == 4:
         return
     
     # Compute retreat pose along normal vector
-    offset_vec = normal_vector * retreat_offset
     retreat_pose = math_helpers.SE2Pose(
-        body_target_pose.x + offset_vec[0],
-        body_target_pose.y + offset_vec[1],
-        body_target_pose.angle
+        -retreat_offset,
+        0,
+        0
     )
+    print("RETREAT POSE IS: ", retreat_pose)
 
     # ACTION: Walk backwards to open drawer
-    navigate_to_absolute_pose(robot, localizer, retreat_pose)
+    navigate_to_relative_pose(robot, retreat_pose)
     if checkpoint == 5:
         return
 
@@ -383,22 +579,57 @@ def open_drawer(
     open_gripper(robot)
     if checkpoint == 6:
         return
+    
+    move_hand_back(robot, 0.1)
 
     # ACTION: Stow arm
     stow_arm(robot)
     if checkpoint == 7:
         return
     
+def look_into_drawer(robot: Robot, localizer: SpotLocalizer):
+    """ 
+    Look into an opened drawer and query Gemini for what objects Spot sees inside.
+
+    Args:
+        robot: Spot robot instance.
+        localizer: SpotLocalizer instance.
+    """
+    # Move arm to look into drawer.
+    gaze(robot, "INTO")
+
+    # Get image of drawer and save it.
+    rgbds = capture_images(robot, localizer, camera_names=["hand_color_image"])
+    rgb = rgbds["hand_color_image"].rgb
+    pil_image = Image.fromarray(rgb)
+    pil_image.save("inside_drawer_camera_output.jpg") 
+
+    # Call Gemini to ask what objects are in the drawer.
+    vlm = GoogleGeminiVLM("gemini-2.0-flash")
+    vlm_output_list = vlm.sample_completions(
+        prompt=prompt_get_objects_inside_drawer,
+        imgs=[pil_image],
+        temperature=0.0,  # Low temp for deterministic output
+        seed=42,
+        num_completions=1,
+    )
+    vlm_output_str = vlm_output_list[0]
+    print(vlm_output_str)
+
 
 prompt_get_handle_pixel = """
-    Point to the handle of the drawer.
+    Point to the green handle of the drawer.
     The answer should follow the json format: [{"point": , "label": }, ...]. The points are in [y, x] format normalized to 0-1000.
     """
 prompt_get_drawer_surface_pixel = """
-    Point to 15 points on the front face of the drawer, but avoid the drawer handles or the edges of the front face.
+    Point to 15 points on the front face of the drawer, but avoid the drawer handles (including the green handle) or the edges of the front face.
+    Make sure the points are on the front face, not the side face.
     The answer should follow the json format: [{"point": , "label": }, ...]. The points are in [y, x] format normalized to 0-1000.
     """
-
+prompt_get_objects_inside_drawer = """
+    Give me a descriptive list of objects inside this drawer.
+    The answer should follow the format: ["object1", "object2", ...].
+    """
 
 if __name__ == "__main__":
     # Run this file alone to test manually.
@@ -443,11 +674,27 @@ if __name__ == "__main__":
     robot.time_sync.wait_for_sync()
     localizer.localize()
     print("[INFO] Localization successful.")
+    # robot = None
+    # localizer = None
+
+    rr.init("open-drawer-test", spawn=True)
 
     # --- Run open_drawer routine ---
     try:
         print("[INFO] Running open_drawer()...")
-        open_drawer(robot, localizer, standoff_dist=0.8, body_height_offset=0.0, retreat_offset=0.1, checkpoint=0)
+        open_drawer(robot, localizer, standoff_dist=1.2, body_height_offset=0.0, retreat_offset=0.4, checkpoint=7)
+        # rgb_image_path = "raw_hand_camera_output.jpg"
+        # debug_gemini_pixels(rgb_image_path)
+        look_into_drawer(robot, localizer)
+        # rgb_image_path = "/Users/lucycai/Desktop/spot/see-spot-plan/raw_hand_camera_output.jpg"
+        # depth_image_path = "/Users/lucycai/Desktop/spot/see-spot-plan/depth_hand_camera_output.png"
+        # fx, fy, cx, cy = 552.0291012161067, 552.0291012161067, 320.0, 240.0
+        # intrinsics = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+        # test_pixels = [(396, 136), (288, 171), (480, 204), (256, 276), (448, 312), (288, 379), (416, 411), (512, 120), (320, 192), (480, 264), (256, 336), (480, 408), (256, 144), (320, 240), (384, 312)]
+        # rgb_img = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
+        # depth_img = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
+        # print(debug_pixels_to_vision_points(test_pixels, rgb_img, depth_img, intrinsics))
+
     except Exception as e:
         print(f"[ERROR] open_drawer() failed: {e}")
     # finally:

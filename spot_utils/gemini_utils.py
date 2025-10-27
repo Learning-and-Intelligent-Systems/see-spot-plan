@@ -11,7 +11,7 @@ def get_pixel_from_gemini(
 ) -> Tuple[int, int]:
     # Assuming create_vlm_by_name exists and works like create_llm_by_name
     # Use the specific model name from CFG or hardcode if necessary
-    vlm = GoogleGeminiVLM("gemini-1.5-flash")
+    vlm = GoogleGeminiVLM("gemini-2.0-flash")
 
     # 2. Construct the query
     # Adjust prompt as needed for better VLM performance
