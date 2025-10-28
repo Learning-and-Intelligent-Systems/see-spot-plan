@@ -1,6 +1,7 @@
 """Interface for opening a drawer."""
 
 import argparse
+import traceback
 import time
 import numpy as np
 from PIL import Image
@@ -83,14 +84,9 @@ def pixels_to_vision_points(
     )
 
     depth_img = rgbd.depth
-    # print(depth_img)
-    # print(np.unique(depth_img))
-    # depth_image = Image.fromarray(depth_img)
-    # depth_image.save("depth_hand_camera_output.png") 
     depth_m = depth_img.astype(np.float32)
     if depth_img.dtype == np.uint16:
         depth_m = depth_m / 1000.0
-    depth_scale = rgbd.depth_scale
     cam_model = rgbd.camera_model  
 
     fx = cam_model.intrinsics.focal_length.x
@@ -98,8 +94,8 @@ def pixels_to_vision_points(
     cx = cam_model.intrinsics.principal_point.x
     cy = cam_model.intrinsics.principal_point.y
 
-    print(f"Intrinsics : {fx, fy, cx, cy}")
-    print(f"Depth scale : {depth_scale}")
+    # print(f"Intrinsics : {fx, fy, cx, cy}")
+    # print(f"Depth scale : {depth_scale}")
 
     pts = []
     for (u, v) in pixels:
@@ -218,7 +214,7 @@ def compute_rotated_body_pose(robot: Robot, normal_vector: Tuple[float, float]) 
     y = vision_T_body.y
     yaw = np.arctan2(-normal_vector[1], -normal_vector[0])
     se2 = vision_T_body.get_closest_se2_transform()
-    print("CURRENT POSE: ", math_helpers.SE2Pose(x, y, se2.angle))
+    # print("CURRENT POSE: ", math_helpers.SE2Pose(x, y, se2.angle))
     return math_helpers.SE2Pose(x, y, yaw)
 
 
@@ -381,30 +377,37 @@ def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
     if rgb.shape[:2] != (h, w):
         rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_NEAREST)
 
-    fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+    fx, fy, cx, cy = intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]
 
     # Create pixel grid
     u_coords, v_coords = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
 
     z = depth_m
-    valid = (z > 0) & (z <= 2.0)
+    valid = (z > 0) & (z <= 1.5)
 
     x = (u_coords - cx) / fx * z
     y = (v_coords - cy) / fy * z
 
     # Stack and mask
     points = np.stack((x, y, z), axis=-1)[valid]
+    if points.shape[0] == 0:
+        print("No points passed the depth filter! Check depth image units and max distance.")
 
     # Colors: convert BGR (cv2) to RGB and normalize to [0,1]
     rgb_rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
     colors = (rgb_rgb.reshape(-1, 3)[valid.ravel()] / 255.0).astype(np.float32)
+    print("positions:", points.shape, points.dtype)
+    print("colors:", colors.shape, colors.dtype)
+    return points, colors
 
     # Build Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
-    pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(points.astype(np.float32))
+    # pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float32))
 
-    return pcd
+    # o3d.visualization.draw_geometries([pcd])
+
+    # return pcd
 
 def open_drawer(
     robot: Robot,
@@ -443,51 +446,58 @@ def open_drawer(
     # Get a 2D pixel on the handle, and convert to 3D point
     handle_pixel = get_pixel_from_gemini(prompt_get_handle_pixel, image_pil)
     draw_colored_pixels(image_pil, [handle_pixel], "annotated_hand_camera_output.jpg", "red")
-    rr.log("drawer_pixels", rr.Image(np.array(image_pil)))
     
-    # cam_model = rgbd.camera_model  
+    cam_model = rgbd.camera_model  
 
-    # fx = cam_model.intrinsics.focal_length.x
-    # fy = cam_model.intrinsics.focal_length.y
-    # cx = cam_model.intrinsics.principal_point.x
-    # cy = cam_model.intrinsics.principal_point.y
+    fx = cam_model.intrinsics.focal_length.x
+    fy = cam_model.intrinsics.focal_length.y
+    cx = cam_model.intrinsics.principal_point.x
+    cy = cam_model.intrinsics.principal_point.y
 
-    # intrinsics = [fx, fy, cx, cy]
+    intrinsics = [fx, fy, cx, cy]
 
-    # rgb_image_path = "raw_hand_camera_output.jpg"
-    # depth_image_path = "raw_hand_camera_depth.png"
-    # pcd = get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics)
+    rgb_image_path = "raw_hand_camera_output.jpg"
+    depth_image_path = "raw_hand_camera_depth.png"
+    points, colors = get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics)
+
+    # Convert entire point cloud from camera → vision frame
+    vision_T_camera = get_a_tform_b(
+        rgbd.transforms_snapshot,
+        VISION_FRAME_NAME,
+        rgbd.frame_name_image_sensor
+    )
+    points_hom = np.hstack([points, np.ones((points.shape[0], 1), dtype=np.float32)])
+    vision_T_camera_mat = vision_T_camera.to_matrix()
+    points_vision = (vision_T_camera_mat @ points_hom.T).T[:, :3].astype(np.float32)
 
     handle_3d_point = pixels_to_vision_points([handle_pixel], rgbd)[0]
-    print("HANDLE 3D POINT IS: ", handle_3d_point)
-    # voxel_size = 0.05
-    # rr.log("3D points", rr.Points3D(positions=pcd.points, colors=pcd.colors, radii=voxel_size/2))
+    voxel_size = 0.005
+    rr.log("3D_points", rr.Points3D(positions=points_vision, colors=colors, radii=voxel_size/2))
     
     # Get pixels on surface of drawer via SAM (try just Gemini first, get 15 pixels on front of drawer)
     front_surface_pixels = get_multiple_pixels_from_gemini(prompt_get_drawer_surface_pixel, image_pil, 15)
     draw_colored_pixels(image_pil, front_surface_pixels, "annotated_hand_camera_output.jpg", "blue")
+    rr.log("drawer_pixels", rr.Image(np.array(image_pil)))
     if checkpoint == 0:
         return
 
     # Convert to 3D points on surface of drawer
     front_surface_3d_points = pixels_to_vision_points(front_surface_pixels, rgbd)
-    rr.log("surface_points", rr.Points3D(front_surface_3d_points))
-    print("FRONT SURFACE 3D POINTS ARE: ",front_surface_3d_points)
+    rr.log("surface_points", rr.Points3D(positions=front_surface_3d_points, colors=[255, 0, 0], radii=voxel_size*1.5))
 
     # Fit a plane to those points via SVD and get normal vector
     _, normal_vector = fit_plane_to_points(front_surface_3d_points)
-    print("NORMAL VECTOR IS: ", normal_vector)
+    # print("NORMAL VECTOR IS: ", normal_vector)
 
     # Compute approach grasp pose, aligned to normal
-    grasp_rot = grasp_orientation_from_normal(normal_vector)
-    print("GRASP ROTATION IS: ", grasp_rot)
+    # grasp_rot = grasp_orientation_from_normal(normal_vector)
 
     # ACTION: Move Spot's body to be aligned to the front of the drawer normal FIRST
     # rotated_body_pose = compute_rotated_body_pose(robot, normal_vector)
     # print("ROTATED POSE IS: ", rotated_body_pose)
     # navigate_to_vision_goal(robot, rotated_body_pose)
     body_target_pose = compute_body_pose_in_front_of_drawer(handle_3d_point, normal_vector, standoff_dist)
-    print("BODY POSE IS: ", body_target_pose)
+    # print("BODY POSE IS: ", body_target_pose)
     navigate_to_vision_goal(robot, body_target_pose)
     if checkpoint == 1:
         return
@@ -498,7 +508,7 @@ def open_drawer(
         return
 
     # ACTION: Grasp at pixel on handle
-    grasp_at_pixel(robot, rgbd, handle_pixel, grasp_rot, move_while_grasping=False)
+    grasp_at_pixel(robot, rgbd, handle_pixel, move_while_grasping=False)
     if checkpoint == 4:
         return
     
@@ -543,6 +553,7 @@ def look_into_drawer(robot: Robot, localizer: SpotLocalizer):
     rgb = rgbds["hand_color_image"].rgb
     pil_image = Image.fromarray(rgb)
     pil_image.save("inside_drawer_camera_output.jpg") 
+    rr.log("inside_drawer_rgb", rr.Image(rgb))
 
     # Call Gemini to ask what objects are in the drawer.
     vlm = GoogleGeminiVLM("gemini-2.0-flash")
@@ -622,11 +633,12 @@ if __name__ == "__main__":
     # --- Run open_drawer routine ---
     try:
         print("[INFO] Running open_drawer()...")
-        open_drawer(robot, localizer, standoff_dist=1.2, body_height_offset=0.0, retreat_offset=0.4, checkpoint=7)
+        open_drawer(robot, localizer, standoff_dist=1.1, body_height_offset=0.0, retreat_offset=0.4, checkpoint=7)
         look_into_drawer(robot, localizer)
 
     except Exception as e:
-        print(f"[ERROR] open_drawer() failed: {e}")
+        print(e)
+        traceback.print_exc()
     # finally:
     #     lease_keepalive.shutdown()
     #     print("[INFO] Lease returned, exiting cleanly.")
