@@ -117,53 +117,9 @@ def pixels_to_vision_points(
 
     pts_cam = np.array(pts).T  # shape 4xN
 
-    # 3. Transform to vision frame
+    # Transform to vision frame
     pts_vision = (vision_T_camera.to_matrix() @ pts_cam).T[:, :3]  # Nx3
     return np.asarray(pts_vision, dtype=np.float32)
-
-    # return np.asarray(pts, dtype=np.float32)[:, :3]
-
-
-def debug_pixels_to_vision_points(
-    pixels: list[tuple[int, int]],
-    rgb_image: np.ndarray, 
-    depth_image: np.ndarray, 
-    intrinsics: np.ndarray, 
-    ) -> NDArray[np.float64]:
-    """
-    Convert 2D pixels (u, v) to 3D points (X, Y, Z) in vision frame.
-
-    Args:
-        pixels: list of (u, v) pixel coordinates
-        rgbd: an RGBDImageWithContext instance from Spot's capture_images()
-
-    Returns:
-        Nx3 array of 3D points in vision frame (in meters)
-    """
-
-    if depth_image.ndim == 3:
-        depth_image = cv2.cvtColor(depth_image, cv2.COLOR_BGR2GRAY)
-    depth_m = depth_image.astype(np.float32)
-    if depth_image.dtype == np.uint16:
-        depth_m = depth_m / 1000.0
-
-    fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
-
-    pts = []
-    for (u, v) in pixels:
-        if v < 0 or v >= depth_m.shape[0] or u < 0 or u >= depth_m.shape[1]:
-            continue
-
-        z = float(depth_m[v, u])
-        # We filter out points further than 2 meters away
-        if z <= 0 or z > 2.0:
-            continue
-
-        x = (float(u) - cx) / fx * z
-        y = (float(v) - cy) / fy * z
-        pts.append([x, y, z])
-
-    return np.asarray(pts, dtype=np.float32)
 
 
 def fit_plane_to_points(points_vision: NDArray[np.float64]):
@@ -248,6 +204,7 @@ def compute_body_pose_in_front_of_drawer(drawer_point: np.ndarray,
 
     return math_helpers.SE2Pose(body_pos[0], body_pos[1], yaw)
 
+
 def compute_rotated_body_pose(robot: Robot, normal_vector: Tuple[float, float]) -> math_helpers.SE2Pose:
     """
     Rotate Spot's body to align with opposite of normal vector.
@@ -294,7 +251,6 @@ def navigate_to_vision_goal(robot, vision_tform_goal: math_helpers.SE2Pose):
     vision_tform_body = get_se2_a_tform_b(transforms, VISION_FRAME_NAME, BODY_FRAME_NAME)
 
     # 3. Compute desired relative motion in body frame
-    # body_T_goal = body^-1 * (vision^-1 * goal)
     body_tform_goal = vision_tform_body.inverse() * vision_tform_goal
 
     # 4. Command robot to move by that relative transform
@@ -401,12 +357,6 @@ def gaze(robot, direction: str) -> None:
     move_hand_to_relative_pose(robot, look_pose)
     open_gripper(robot)
 
-def debug_gemini_pixels(rgb_image_path):
-    
-    image_pil = Image.open(rgb_image_path)
-
-    front_surface_pixels = get_multiple_pixels_from_gemini(prompt_get_drawer_surface_pixel, image_pil, 15)
-    print(front_surface_pixels)
 
 def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
     rgb = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
@@ -474,10 +424,6 @@ def open_drawer(
         timeout: Seconds to allow for each arm motion.
     """
     # Gaze at drawer ahead
-    # gaze(direction_to_pose["AHEAD"])
-    # open_gripper(robot)
-    # stow_arm(robot)
-
     gaze(robot, "AHEAD")
 
     # Capture RGBD image from Spot hand camera
@@ -485,7 +431,7 @@ def open_drawer(
     rgbd = rgbds["hand_color_image"]
     # rgbd=None
 
-    # Extract RGB image
+    # Extract RGB image and depth image
     rgb = rgbd.rgb
     depth = rgbd.depth
     depth_pil = Image.fromarray(depth)
@@ -493,8 +439,6 @@ def open_drawer(
     rr.log("drawer_rgb", rr.Image(rgb))
     image_pil = Image.fromarray(rgb)
     image_pil.save("raw_hand_camera_output.jpg") 
-    # image_pil = Image.open("raw_hand_camera_output.jpg")
-    # image_pil = image_pil.convert("RGB")
 
     # Get a 2D pixel on the handle, and convert to 3D point
     handle_pixel = get_pixel_from_gemini(prompt_get_handle_pixel, image_pil)
@@ -532,14 +476,15 @@ def open_drawer(
 
     # Fit a plane to those points via SVD and get normal vector
     _, normal_vector = fit_plane_to_points(front_surface_3d_points)
-    print("NORMAL VECTOR IS: ",normal_vector)
+    print("NORMAL VECTOR IS: ", normal_vector)
 
     # Compute approach grasp pose, aligned to normal
     grasp_rot = grasp_orientation_from_normal(normal_vector)
+    print("GRASP ROTATION IS: ", grasp_rot)
 
     # ACTION: Move Spot's body to be aligned to the front of the drawer normal FIRST
-    rotated_body_pose = compute_rotated_body_pose(robot, normal_vector)
-    print("ROTATED POSE IS: ", rotated_body_pose)
+    # rotated_body_pose = compute_rotated_body_pose(robot, normal_vector)
+    # print("ROTATED POSE IS: ", rotated_body_pose)
     # navigate_to_vision_goal(robot, rotated_body_pose)
     body_target_pose = compute_body_pose_in_front_of_drawer(handle_3d_point, normal_vector, standoff_dist)
     print("BODY POSE IS: ", body_target_pose)
@@ -552,13 +497,8 @@ def open_drawer(
     if checkpoint == 2:
         return
 
-    # ACTION: Open gripper
-    # open_gripper(robot)
-    # if checkpoint == 3:
-    #     return
-
     # ACTION: Grasp at pixel on handle
-    grasp_at_pixel(robot, rgbd, handle_pixel, move_while_grasping=False)
+    grasp_at_pixel(robot, rgbd, handle_pixel, grasp_rot, move_while_grasping=False)
     if checkpoint == 4:
         return
     
@@ -568,7 +508,7 @@ def open_drawer(
         0,
         0
     )
-    print("RETREAT POSE IS: ", retreat_pose)
+    # print("RETREAT POSE IS: ", retreat_pose)
 
     # ACTION: Walk backwards to open drawer
     navigate_to_relative_pose(robot, retreat_pose)
@@ -683,17 +623,7 @@ if __name__ == "__main__":
     try:
         print("[INFO] Running open_drawer()...")
         open_drawer(robot, localizer, standoff_dist=1.2, body_height_offset=0.0, retreat_offset=0.4, checkpoint=7)
-        # rgb_image_path = "raw_hand_camera_output.jpg"
-        # debug_gemini_pixels(rgb_image_path)
         look_into_drawer(robot, localizer)
-        # rgb_image_path = "/Users/lucycai/Desktop/spot/see-spot-plan/raw_hand_camera_output.jpg"
-        # depth_image_path = "/Users/lucycai/Desktop/spot/see-spot-plan/depth_hand_camera_output.png"
-        # fx, fy, cx, cy = 552.0291012161067, 552.0291012161067, 320.0, 240.0
-        # intrinsics = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
-        # test_pixels = [(396, 136), (288, 171), (480, 204), (256, 276), (448, 312), (288, 379), (416, 411), (512, 120), (320, 192), (480, 264), (256, 336), (480, 408), (256, 144), (320, 240), (384, 312)]
-        # rgb_img = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
-        # depth_img = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
-        # print(debug_pixels_to_vision_points(test_pixels, rgb_img, depth_img, intrinsics))
 
     except Exception as e:
         print(f"[ERROR] open_drawer() failed: {e}")
