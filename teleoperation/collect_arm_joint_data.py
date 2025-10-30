@@ -50,7 +50,7 @@ def get_arm_data():
                 robot_state = get_robot_state(robot)
                 joint_states = robot_state.kinematic_state.joint_states
                 joint_dict = {js.name: js for js in joint_states}
-                
+
                 positions = []
                 print(f"[Timestep {timestep}]")
                 for joint_name in arm_joint_names:
@@ -66,7 +66,7 @@ def get_arm_data():
                 print(f"  gripper: {gripper_normalized:.4f} [{gripper_status}] (raw={gripper_raw:.1f})")
                 print()
                 
-                f.write(f"{timestep}, {', '.join(f'{p:.6f}' for p in positions)}, {gripper_normalized:.6f}\n")
+                f.write(f"{timestep}, {', '.join(f'{p}' for p in positions)}, {gripper_normalized}\n")
                 f.flush()
                 
                 timestep += 1
