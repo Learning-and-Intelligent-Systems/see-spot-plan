@@ -38,6 +38,22 @@ def replay_arm_data(robot, filename, rate_hz=50.0, window_size=3):
     
     command_client = robot.ensure_client(RobotCommandClient.default_service_name)
     
+    print("Moving to start position...")
+    start_positions = positions_data[0][1]
+    start_point = RobotCommandBuilder.create_arm_joint_trajectory_point(
+        start_positions[0], start_positions[1], start_positions[2],
+        start_positions[3], start_positions[4], start_positions[5],
+        time_since_reference_secs=2.0
+    )
+    start_traj = arm_command_pb2.ArmJointTrajectory(points=[start_point])
+    start_move = arm_command_pb2.ArmJointMoveCommand.Request(trajectory=start_traj)
+    start_arm_cmd = arm_command_pb2.ArmCommand.Request(arm_joint_move_command=start_move)
+    start_sync = synchronized_command_pb2.SynchronizedCommand.Request(arm_command=start_arm_cmd)
+    start_robot_cmd = robot_command_pb2.RobotCommand(synchronized_command=start_sync)
+    command_client.robot_command(start_robot_cmd)
+    time.sleep(2.2)
+    print("Starting replay...\n")
+    
     dt = 1.0 / rate_hz
     last_gripper_value = None
     
@@ -133,7 +149,7 @@ def main():
 
     # CHANGE THIS FILE TO REPLAY THE MOTION!
     # YOUR FILE SHOULD BE IN THE 'teleoperation_data' FOLDER!
-    replay_arm_data(robot, "teleoperation_data/arm_joints_20251029_213553.txt")
+    replay_arm_data(robot, "teleoperation_data/arm_joints_20251030_133619.txt")
 
 
 if __name__ == "__main__":
