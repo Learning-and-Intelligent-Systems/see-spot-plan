@@ -151,7 +151,7 @@ if __name__ == "__main__":
         )
         # Execute the sweep.
         wipe_multiple_strokes(
-            robot, start_pose, end_pose, 0.0, 0.4, (0.05, 0.0), 5, 1.0
+            robot, start_pose, end_pose, 0.0, 0.4, (0.05, 0.0), 5, 1.0, 1
         )
 
     _run_manual_test()
