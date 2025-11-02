@@ -24,6 +24,7 @@ from skills.spot_hand_move import (
     open_gripper,
 )
 from skills.wipe import wipe_multiple_strokes
+from skills.wipe_online import wipe_online as run_wipe_online
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
@@ -163,6 +164,16 @@ def vertical_wipe(
     )
 
 
+def wipe_at(*args, **kwargs) -> None:
+    """Run the online wipe skill using defaults from the skill module."""
+    run_wipe_online(
+        ROBOT,
+        None,
+        None,
+        LOCALIZER,
+    )
+
+
 if __name__ == "__main__":
     # running this script standalone initializes a bosdyn robot and localizer.
     # It then executes the list of commands provided in the plan file
@@ -196,7 +207,7 @@ if __name__ == "__main__":
             SPOT_ROOM_POSE = metadata["spot-room-pose"]
         else:
             print("spot-room-pose not found in metadata.yaml, using default val")
-            SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "z": 0.0}
+            SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "angle": 0.0}
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
     print("done")

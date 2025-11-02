@@ -64,6 +64,15 @@ direction_to_pose = {
     "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE,
 }
 
+DEFAULT_WIPE_ONLINE_Z_OFFSET = 0.02
+DEFAULT_WIPE_VLM_QUERY_TEMPLATE = (
+    "I have an image with some text written on it, and I am interested in finding "
+    "a bounding box for it. Can you give me the coordinates of the bounding box "
+    "that encloses the written text? The answer should follow the json format: "
+    '{"bbox": [ymin, xmin, ymax, xmax], "label": "spill"}. '
+    "The coordinates are in [ymin, xmin, ymax, xmax] format normalized to 0-1000."
+)
+
 
 def visualize_bbox_normalized(image_path, bbox_norm, color=(0, 255, 0), thickness=2):
     """
@@ -427,7 +436,6 @@ def get_bbox_from_gemini(
         List of [ymin, xmin, ymax, xmax] in pixel coordinates
     """
     # Ensure API key is set for Gemini
-    os.environ["GOOGLE_API_KEY"] = "AIzaSyDCgHTHeGFUe1DCeryLImqqjgPiAyUzw3k"
     # vlm = GoogleGeminiVLM("gemini-2.5-flash-preview-05-20")
     print(f'inside the function to get the bbox from gemini')
     # vlm = GoogleGeminiVLM("gemini-2.5-flash")
@@ -544,13 +552,21 @@ def gaze(robot, direction: str) -> None:
     """Move the hand to look in a certain direction."""
     look_pose = direction_to_pose[direction]
     move_hand_to_relative_pose(robot, look_pose)
-    open_gripper(robot)
+    # open_gripper(robot)
 
-def wipe_online(robot: Robot, lease_client: LeaseClient, lease_keepalive: LeaseKeepAlive, localizer: SpotLocalizer, vlm_query_template: str, z_offset: float) -> None:
+def wipe_online(
+    robot: Robot,
+    lease_client: LeaseClient,
+    lease_keepalive: LeaseKeepAlive,
+    localizer: SpotLocalizer,
+    vlm_query_template: Optional[str] = None,
+    z_offset: float = DEFAULT_WIPE_ONLINE_Z_OFFSET,
+) -> None:
     # stow the arm
     stow_arm(robot)
     # have the robot look ahead to look at the spill 
-    gaze(robot, "DOWN")
+    gaze(robot, "AHEAD")
+    # gaze(robot, "DOWN")
     
     # capture the image using the hand camera 
     rgbds = capture_images(robot, localizer, camera_names=["hand_color_image"])
@@ -592,12 +608,16 @@ def wipe_online(robot: Robot, lease_client: LeaseClient, lease_keepalive: LeaseK
     rr.log("rgb", rr.Image(rgb_img))
     rr.log("depth", rr.Image(depth_img))
 
+    # assert False
+
     ## call the gemini endpoint to get the bbox prediction corresponding to the spill 
 #     vlm_query_template = """
 # Identify the spill/stain on the surface and provide a bounding box around it.
 # The answer should follow the json format: {"bbox": [ymin, xmin, ymax, xmax], "label": "spill"}. 
 # The coordinates are in [ymin, xmin, ymax, xmax] format normalized to 0-1000.
 # """
+    if vlm_query_template is None:
+        vlm_query_template = DEFAULT_WIPE_VLM_QUERY_TEMPLATE
     # vlm_query_template = "I have an image with some text written on it, and I am interested in finding a bounding box for it. Can you give me the coordinates of the bounding box that encloses the written text?"
     bbox = get_bbox_from_gemini(vlm_query_template, rgb_pil)
     print(f"Bbox: {bbox}")
@@ -659,7 +679,7 @@ def main() -> None:
     parser.add_argument(
         "--z_offset",
         type=float,
-        default=0.02,
+        default=0.00,
         help="Hand Z offset above surface in meters (clearance).",
     )
     args = parser.parse_args()
