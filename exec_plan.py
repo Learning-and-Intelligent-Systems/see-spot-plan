@@ -25,6 +25,7 @@ from skills.spot_hand_move import (
 )
 from skills.wipe import wipe_multiple_strokes
 from skills.wipe_online import wipe_online as run_wipe_online
+from skills.push_button import push_button as run_push_button
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
@@ -173,6 +174,21 @@ def wipe_at(*args, **kwargs) -> None:
         LOCALIZER,
     )
 
+
+def press(text_prompt: Optional[str]) -> None:
+    """Identify a button and push it using the hand camera.
+
+    If text_prompt is provided, it will be used as the label (e.g., "button").
+    """
+    label = text_prompt if text_prompt else "button"
+    if ROBOT is not None and LOCALIZER is not None:
+        run_push_button(
+            ROBOT,
+            LOCALIZER,
+            label=label,
+            sam_endpoint=SAM_ENDPOINT,
+            use_vlm=True,
+        )
 
 if __name__ == "__main__":
     # running this script standalone initializes a bosdyn robot and localizer.
