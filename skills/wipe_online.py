@@ -31,6 +31,8 @@ from datetime import datetime
 from PIL import Image
 import open3d as o3d
 
+rr.init("wipe_online", spawn=True)
+
 def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseKeepAlive, SpotLocalizer]:
     sdk = create_standard_sdk("WipeOnlineClient")
     robot = sdk.create_robot(hostname)
@@ -143,14 +145,13 @@ def draw_bounding_box(image_path, bbox_pixels, color=(0, 255, 0), thickness=2):
     # return img_out
     return output_path
 
-def move_hand_to_bbox_bottom_right(
-    robot: Robot,
+def compute_target_pose_from_bbox(
     rgbd,
     bbox_pixels: list[int],
-    z_clearance_m: float = 0.01,
-):
+    z_clearance_m: float = 0.02,
+) -> math_helpers.SE3Pose:
     """
-    Move the hand to the 3D point corresponding to the bbox bottom-right pixel.
+    Compute the target pose from the bbox pixels.
     bbox_pixels: [ymin, xmin, ymax, xmax] in pixel units.
     """
     ymin, xmin, ymax, xmax = bbox_pixels
@@ -195,7 +196,8 @@ def move_hand_to_bbox_bottom_right(
         rot=math_helpers.Quat.from_pitch(np.pi / 2),
     )
 
-    move_hand_to_relative_pose(robot, target_pose)
+    # move_hand_to_relative_pose(robot, target_pose)
+    return target_pose
 
 def wipe_one_stroke(
     robot: Robot,
@@ -350,7 +352,7 @@ def _compute_wipe_params_from_bbox(
     else:
         side_dir = np.array([0.0, 0.0])
     delta_x_y_between_strokes = (float(side_dir[0] * spacing_m), float(side_dir[1] * spacing_m))
-    num_strokes = max(1, int(width_m / max(spacing_m, 1e-3)))
+    num_strokes = max(1, int(width_m / max(spacing_m, 1e-3))+1)
 
     end_look_pose = math_helpers.SE3Pose(
         x=0.65, y=0.0, z=0.4, rot=math_helpers.Quat.from_pitch(np.pi / 2.5)
@@ -552,7 +554,7 @@ def gaze(robot, direction: str) -> None:
     """Move the hand to look in a certain direction."""
     look_pose = direction_to_pose[direction]
     move_hand_to_relative_pose(robot, look_pose)
-    # open_gripper(robot)
+    open_gripper(robot)
 
 def wipe_online(
     robot: Robot,
@@ -590,57 +592,84 @@ def wipe_online(
     save_folderpath = "wipe_online_images"
     os.makedirs(save_folderpath, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     ## save the rgb and the depth image to the disk
     rgb_pil = Image.fromarray(rgb_img)
     depth_pil = Image.fromarray(depth_img)
-    rgb_pil.save(os.path.join(save_folderpath, f"rgb_{timestamp}.png"))
-    depth_pil.save(os.path.join(save_folderpath, f"depth_{timestamp}.png"))
+    rgb_image_path = os.path.join(save_folderpath, f"rgb_{timestamp}.png")
+    depth_image_path = os.path.join(save_folderpath, f"depth_{timestamp}.png")
+    rgb_pil.save(rgb_image_path)
+    depth_pil.save(depth_image_path)
 
-    points, colors = get_points_from_pixels(os.path.join(save_folderpath, f"rgb_{timestamp}.png"), os.path.join(save_folderpath, f"depth_{timestamp}.png"), intrinsics)
-    # use the rgb image to detect the spill by querying the Gemini endpoint 
-    # spill_pixel = get_pixel_from_gemini(vlm_query_template, rgb_pil)
+    points, colors = get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics)
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points.astype(np.float32))
     pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float32))
     # o3d.visualization.draw_geometries([pcd])
+
     voxel_size = 0.005
-    rr.log("3D_points", rr.Points3D(positions=points, colors=colors, radii=voxel_size/2))
-    rr.log("rgb", rr.Image(rgb_img))
-    rr.log("depth", rr.Image(depth_img))
+    rgb = cv2.cvtColor(cv2.imread(rgb_image_path), cv2.COLOR_BGR2RGB)
+    rr.log('camera/rgb', rr.Image(rgb))
 
-    # assert False
+    depth = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / 1000.0
+    print(f'printing the max and min values of the depth image : {depth.max()} and {depth.min()}')
+    rr.log('camera/depth', rr.Image(depth))
 
-    ## call the gemini endpoint to get the bbox prediction corresponding to the spill 
-#     vlm_query_template = """
-# Identify the spill/stain on the surface and provide a bounding box around it.
-# The answer should follow the json format: {"bbox": [ymin, xmin, ymax, xmax], "label": "spill"}. 
-# The coordinates are in [ymin, xmin, ymax, xmax] format normalized to 0-1000.
-# """
+    # Transform points from camera frame to BODY frame for consistent visualization with target_pose
+    T_vision_cam = get_a_tform_b(
+        rgbd.transforms_snapshot, VISION_FRAME_NAME, rgbd.frame_name_image_sensor
+    ).to_matrix()
+    T_body_vision = get_a_tform_b(
+        rgbd.transforms_snapshot, BODY_FRAME_NAME, VISION_FRAME_NAME
+    ).to_matrix()
+    T_body_cam = T_body_vision @ T_vision_cam
+
+    points_cam = points.astype(np.float32)
+    num_pts = points_cam.shape[0]
+    if num_pts > 0:
+        points_cam_h = np.concatenate([points_cam, np.ones((num_pts, 1), dtype=np.float32)], axis=1)
+        points_body_h = (T_body_cam @ points_cam_h.T).T
+        points_body = points_body_h[:, :3].astype(np.float32)
+    else:
+        points_body = points_cam
+
+    # Log the 3D points in BODY frame
+    rr.log('scene/points3d_body', rr.Points3D(positions=points_body, colors=colors, radii=voxel_size/2))
+
     if vlm_query_template is None:
         vlm_query_template = DEFAULT_WIPE_VLM_QUERY_TEMPLATE
     # vlm_query_template = "I have an image with some text written on it, and I am interested in finding a bounding box for it. Can you give me the coordinates of the bounding box that encloses the written text?"
     bbox = get_bbox_from_gemini(vlm_query_template, rgb_pil)
-    print(f"Bbox: {bbox}")
-    # output_path = visualize_bbox_prediction(os.path.join(save_folderpath, f"rgb_{timestamp}.png"), bbox)
+    print(f"The coordinates of the bounding box are: {bbox}")
+
+    ## log the annotated image with the bounding box 
     annotated_image_path = draw_bounding_box(os.path.join(save_folderpath, f"rgb_{timestamp}.png"), bbox)
-    # Convert BGR (cv2) -> RGB before logging
-    # rr.log("bounding_box_image", rr.Image(cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)))
-    annotated_img = Image.open(annotated_image_path)
-    rr.log("annotated_image", rr.Image(annotated_img))
-    ## move the hand to the bottom-right of the bounding box to verify position 
-    move_hand_to_bbox_bottom_right(robot, rgbd, bbox, z_clearance_m=z_offset) ## this should move the hand to the bottom-right position 
+    annotated_img = cv2.cvtColor(cv2.imread(annotated_image_path), cv2.COLOR_BGR2RGB)
+    rr.log('results/annotated', rr.Image(annotated_img))
 
-    ## once the hand has been moved to the bottom-right of the bounding box, 
-    ## we need to start executing the parameterized skill for wiping the spill 
+    ## move the hand to the bottom-right position of the bounding box 
+    target_pose = compute_target_pose_from_bbox(rgbd, bbox, z_clearance_m=z_offset)
+    # Log a red sphere at the target pose position
+    rr.log(
+        'results/target_pose_marker',
+        rr.Points3D(
+            positions=np.array([[target_pose.x, target_pose.y, target_pose.z]], dtype=np.float32),
+            colors=np.array([[255, 0, 0]], dtype=np.uint8),
+            radii=0.03,
+        ),
+    )
+    
+    move_hand_to_relative_pose(robot, target_pose)
 
-    (
-        wipe_start_pose,
-        stroke_dx,
-        stroke_dy,
-        delta_x_y_between_strokes,
-        num_strokes,
-        end_look_pose,
-    ) = _compute_wipe_params_from_bbox(rgbd, bbox, clearance=z_offset, spacing_m=0.05, max_stroke_len=0.35)
+    ## compute the wipe parameters from the bounding box coordinates 
+    wipe_start_pose, stroke_dx, stroke_dy, delta_x_y_between_strokes, num_strokes, end_look_pose = _compute_wipe_params_from_bbox(rgbd, bbox, clearance=z_offset, spacing_m=0.05, max_stroke_len=0.35)
+    # ## log the wipe parameters in rerun 
+    # rr.log('results/wipe_start_pose', rr.Pose3D(position=wipe_start_pose.position, rotation=wipe_start_pose.rotation))
+    # rr.log('results/stroke_dx', stroke_dx)
+    # rr.log('results/stroke_dy', stroke_dy)
+    # rr.log('results/delta_x_y_between_strokes', delta_x_y_between_strokes)
+    # rr.log('results/num_strokes', num_strokes)
+    # rr.log('results/end_look_pose', rr.Pose3D(position=end_look_pose.position, rotation=end_look_pose.rotation))
 
     # Example: run a single stroke first (uncomment to test)
     # wipe_one_stroke(robot, wipe_start_pose, move_dx=stroke_dx, move_dy=stroke_dy, duration=1.0)
@@ -657,10 +686,6 @@ def wipe_online(
         duration_per_stroke=1.0,
         num_attempts_per_stroke=1,
     )
-
-    ## once the bounding box coordinates have been successfully obtained 
-    ## we need to place the arm in the right position (one of the corners of the bounding box) to clean the spill 
-    ## we have the identified pixels/bb-coordinates in the camera frame (hand-camera)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Online wiping controller.")
@@ -684,7 +709,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     robot, lease_client, lease_keepalive, localizer = init_robot(args.hostname, args.map_name)
-    rr.init("wipe_online", spawn=True)
+    # rr.init("wipe_online", spawn=True)
 
     vlm_query_template = """
 I have an image with some text written on it, and I am interested in finding a bounding box for it. Can you give me the coordinates of the bounding box that encloses the written text? 
