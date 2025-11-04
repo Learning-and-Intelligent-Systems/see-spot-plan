@@ -339,6 +339,7 @@ def _compute_wipe_params_from_bbox(
         up_dir = np.array([0.0, 0.0])
     else:
         up_dir = up_vec[:2] / up_len
+    # Stroke length from bbox height, limited by max_stroke_len
     stroke_len = min(up_len, max_stroke_len)
     stroke_dx = float(up_dir[0] * stroke_len)
     stroke_dy = float(up_dir[1] * stroke_len)
@@ -563,6 +564,7 @@ def wipe_online(
     localizer: SpotLocalizer,
     vlm_query_template: Optional[str] = None,
     z_offset: float = DEFAULT_WIPE_ONLINE_Z_OFFSET,
+    expand_percentage: float = 0.0,
 ) -> None:
     # stow the arm
     stow_arm(robot)
@@ -642,6 +644,21 @@ def wipe_online(
     bbox = get_bbox_from_gemini(vlm_query_template, rgb_pil)
     print(f"The coordinates of the bounding box are: {bbox}")
 
+    # Optionally expand bbox in image space by a percentage along all directions
+    if expand_percentage and expand_percentage > 0.0:
+        ymin, xmin, ymax, xmax = bbox
+        H, W = rgb_img.shape[0], rgb_img.shape[1]
+        height_px = max(1, (ymax - ymin))
+        width_px = max(1, (xmax - xmin))
+        dy = int(round(0.5 * expand_percentage * height_px))
+        dx = int(round(0.5 * expand_percentage * width_px))
+        ymin_exp = max(0, ymin - dy)
+        ymax_exp = min(H - 1, ymax + dy)
+        xmin_exp = max(0, xmin - dx)
+        xmax_exp = min(W - 1, xmax + dx)
+        bbox = [ymin_exp, xmin_exp, ymax_exp, xmax_exp]
+        print(f"Expanded bbox by {expand_percentage*100:.1f}% -> {bbox}")
+
     ## log the annotated image with the bounding box 
     annotated_image_path = draw_bounding_box(os.path.join(save_folderpath, f"rgb_{timestamp}.png"), bbox)
     annotated_img = cv2.cvtColor(cv2.imread(annotated_image_path), cv2.COLOR_BGR2RGB)
@@ -662,7 +679,13 @@ def wipe_online(
     move_hand_to_relative_pose(robot, target_pose)
 
     ## compute the wipe parameters from the bounding box coordinates 
-    wipe_start_pose, stroke_dx, stroke_dy, delta_x_y_between_strokes, num_strokes, end_look_pose = _compute_wipe_params_from_bbox(rgbd, bbox, clearance=z_offset, spacing_m=0.05, max_stroke_len=0.35)
+    wipe_start_pose, stroke_dx, stroke_dy, delta_x_y_between_strokes, num_strokes, end_look_pose = _compute_wipe_params_from_bbox(
+        rgbd,
+        bbox,
+        clearance=z_offset,
+        spacing_m=0.05,
+        max_stroke_len=0.35,
+    )
 
     # Visualize the wipe surface in BODY frame: corners, mesh, and stroke paths
     def _as_np_pose(p):
@@ -752,6 +775,12 @@ def main() -> None:
         default=0.00,
         help="Hand Z offset above surface in meters (clearance).",
     )
+    parser.add_argument(
+        "--expand_percentage",
+        type=float,
+        default=0.0,
+        help="Fraction to expand bbox in image space (e.g., 0.2 for +20%).",
+    )
     args = parser.parse_args()
     robot, lease_client, lease_keepalive, localizer = init_robot(args.hostname, args.map_name)
     # rr.init("wipe_online", spawn=True)
@@ -760,7 +789,15 @@ def main() -> None:
 I have an image with some text written on it, and I am interested in finding a bounding box for it. Can you give me the coordinates of the bounding box that encloses the written text? 
 The answer should follow the json format: {"bbox": [ymin, xmin, ymax, xmax], "label": "spill"}. 
 The coordinates are in [ymin, xmin, ymax, xmax] format normalized to 0-1000."""
-    wipe_online(robot, lease_client, lease_keepalive, localizer, vlm_query_template, args.z_offset)
+    wipe_online(
+        robot,
+        lease_client,
+        lease_keepalive,
+        localizer,
+        vlm_query_template,
+        args.z_offset,
+        args.expand_percentage,
+    )
 
 if __name__ == "__main__":
     main()
