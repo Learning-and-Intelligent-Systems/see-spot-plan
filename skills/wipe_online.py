@@ -663,17 +663,62 @@ def wipe_online(
 
     ## compute the wipe parameters from the bounding box coordinates 
     wipe_start_pose, stroke_dx, stroke_dy, delta_x_y_between_strokes, num_strokes, end_look_pose = _compute_wipe_params_from_bbox(rgbd, bbox, clearance=z_offset, spacing_m=0.05, max_stroke_len=0.35)
-    # ## log the wipe parameters in rerun 
-    # rr.log('results/wipe_start_pose', rr.Pose3D(position=wipe_start_pose.position, rotation=wipe_start_pose.rotation))
-    # rr.log('results/stroke_dx', stroke_dx)
-    # rr.log('results/stroke_dy', stroke_dy)
-    # rr.log('results/delta_x_y_between_strokes', delta_x_y_between_strokes)
-    # rr.log('results/num_strokes', num_strokes)
-    # rr.log('results/end_look_pose', rr.Pose3D(position=end_look_pose.position, rotation=end_look_pose.rotation))
 
-    # Example: run a single stroke first (uncomment to test)
-    # wipe_one_stroke(robot, wipe_start_pose, move_dx=stroke_dx, move_dy=stroke_dy, duration=1.0)
+    # Visualize the wipe surface in BODY frame: corners, mesh, and stroke paths
+    def _as_np_pose(p):
+        return np.array([p.x, p.y, p.z], dtype=np.float32)
 
+    start = _as_np_pose(wipe_start_pose)
+    stroke_vec = np.array([stroke_dx, stroke_dy, 0.0], dtype=np.float32)
+    delta_vec = np.array([delta_x_y_between_strokes[0], delta_x_y_between_strokes[1], 0.0], dtype=np.float32)
+
+    # Corners A (start), B (start + stroke), D (last row start), C (last row end)
+    A = start
+    B = start + stroke_vec
+    D = start + max(int(num_strokes) - 1, 0) * delta_vec
+    C = D + stroke_vec
+
+    corners_body = np.stack([A, B, C, D], axis=0).astype(np.float32)
+
+    # i) visualize the 3D corners
+    rr.log(
+        'scene/wipe_surface/corners',
+        rr.Points3D(
+            positions=corners_body,
+            colors=np.array([[0, 128, 255]] * 4, dtype=np.uint8),
+            radii=0.01,
+        ),
+    )
+
+    # ii) visualize the wipe surface polygon (two triangles)
+    rr.log(
+        'scene/wipe_surface/mesh',
+        rr.Mesh3D(
+            vertex_positions=corners_body,
+            triangle_indices=np.array([[0, 1, 2], [0, 2, 3]], dtype=np.uint32),
+            vertex_colors=np.array([[0, 255, 0, 80]] * 4, dtype=np.uint8),
+        ),
+    )
+
+    # iii) Visualize the wipe strokes (paths)
+    strokes = []
+    curr = start.copy()
+    for _ in range(int(max(num_strokes, 0))):
+        s = curr
+        e = curr + stroke_vec
+        strokes.append(np.stack([s, e], axis=0))
+        curr = curr + delta_vec
+
+    if len(strokes) > 0:
+        rr.log(
+            'scene/wipe_surface/strokes',
+            rr.LineStrips3D(
+                strips=strokes,
+                colors=np.array([[255, 0, 0]], dtype=np.uint8),
+                radii=0.005,
+            ),
+        )
+    
     # Run multi-stroke wipe
     wipe_multiple_strokes(
         robot=robot,
