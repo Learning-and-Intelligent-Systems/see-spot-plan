@@ -93,8 +93,8 @@ def map_to_spot(pose: math_helpers.SE2Pose) -> math_helpers.SE2Pose:
 def move_to(x_abs: float, y_abs: float, yaw_abs: float) -> None:
     """Move the robot to the specified absolute pose."""
     print(f"move_to(x_abs={x_abs}, y_abs={y_abs}, yaw_abs={yaw_abs}")
-    desired_pose = math_helpers.SE2Pose(x=x_abs, y=y_abs, angle=yaw_abs)
-    desired_pose_spot = map_to_spot(desired_pose)
+    desired_pose_spot = math_helpers.SE2Pose(x=x_abs, y=y_abs, angle=yaw_abs)
+    # desired_pose_spot = map_to_spot(desired_pose)
     if ROBOT is not None and LOCALIZER is not None:
         navigate_to_absolute_pose_precise(
             ROBOT, LOCALIZER, desired_pose_spot, tolerance=0.05
