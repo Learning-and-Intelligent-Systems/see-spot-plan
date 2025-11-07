@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from exec_plan import move_to, init, get_graph_nav_dir
+from open_drawer import open_drawer
 import argparse
 import yaml
 
@@ -20,7 +21,6 @@ def api_move_to():
         "yaw": <float>
     }
     """
-    print("hi")
     data = request.get_json()
     x = data.get("x")
     y = data.get("y")
@@ -35,6 +35,38 @@ def api_move_to():
     try:
         move_to(float(x), float(y), float(yaw))
         return jsonify({"status": "ok", "message": f"Moved to ({x}, {y}, {yaw})"})
+    except Exception as e:
+        import traceback
+        print("ERROR:", e)
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
+
+# open_drawer(robot, localizer, standoff_dist=1.1, body_height_offset=0.0, retreat_offset=0.4, checkpoint=7)
+@app.route("/open_drawer", methods=["POST"])
+def api_open_drawer():
+    """
+    Expects JSON:
+    {
+        "standoff_dist": <float>,
+        "body_height_offset": <float>,
+        "retreat_offset": <float>
+    }
+    """
+    data = request.get_json()
+    standoff_dist = data.get("standoff_dist")
+    body_height_offset = data.get("body_height_offset")
+    retreat_offset = data.get("retreat_offset")
+    print(standoff_dist)
+    print(body_height_offset)
+    print(retreat_offset)
+
+    if None in (standoff_dist, body_height_offset, retreat_offset):
+        return jsonify({"error": "Missing standoff_dist, body_height_offset, or retreat_offset"}), 400
+
+    try:
+        open_drawer(robot, localizer, standoff_dist, body_height_offset, retreat_offset)
+        return jsonify({"status": "ok", "message": f"Opened drawer!"})
     except Exception as e:
         import traceback
         print("ERROR:", e)
@@ -71,16 +103,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Initialize Spot connection
-    init(args.hostname, args.map_name, args.sam_endpoint)
-
-    # Load SPOT_ROOM_POSE if available
-    # with open(get_graph_nav_dir(args.map_name) / "metadata.yaml", "rb") as f:
-    #     metadata = yaml.safe_load(f)
-    #     if "spot-room-pose" in metadata.keys():
-    #         SPOT_ROOM_POSE = metadata["spot-room-pose"]
-    #     else:
-    #         print("spot-room-pose not found in metadata.yaml, using default val")
-    SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "angle": 0.0}
+    robot, localizer, sam_endpoint = init(args.hostname, args.map_name, args.sam_endpoint)
 
     # Start Flask server
     app.run(host="0.0.0.0", port=args.port)

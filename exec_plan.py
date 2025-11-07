@@ -80,6 +80,7 @@ def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
     ROBOT.time_sync.wait_for_sync()
     LOCALIZER.localize()
     SAM_ENDPOINT = endpoint_url
+    return ROBOT, LOCALIZER, SAM_ENDPOINT
 
 
 def map_to_spot(pose: math_helpers.SE2Pose) -> math_helpers.SE2Pose:
@@ -97,7 +98,7 @@ def move_to(x_abs: float, y_abs: float, yaw_abs: float) -> None:
     # desired_pose_spot = map_to_spot(desired_pose)
     if ROBOT is not None and LOCALIZER is not None:
         navigate_to_absolute_pose_precise(
-            ROBOT, LOCALIZER, desired_pose_spot, tolerance=0.05
+            ROBOT, LOCALIZER, desired_pose_spot, max_xytheta_vel=[1,1,1], min_xytheta_vel=[-1,-1,-1], tolerance=0.05
         )
 
 
