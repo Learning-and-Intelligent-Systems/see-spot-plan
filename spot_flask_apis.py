@@ -11,6 +11,37 @@ Example use:
 
 app = Flask(__name__)
 
+@app.route("/get_location", methods=["GET"])
+def api_get_location():
+    """
+    Returns the robot's current location in the mapping world frame (GraphNav seed frame).
+    Example response:
+    {
+        "x": 1.23,
+        "y": 0.45,
+        "z": 0.0,
+        "yaw": 1.57
+    }
+    """
+    try:
+        # Re-localize to update Spot's position
+        localizer.localize()
+
+        # Get last known robot pose
+        pose = localizer.get_last_robot_pose()
+
+        # Extract translation and rotation (yaw)
+        x, y, z, yaw = pose.x, pose.y, pose.z, pose.rot.to_yaw()
+
+        return jsonify({"status": "ok", "x": x, "y": y, "z": z, "yaw": yaw})
+
+    except Exception as e:
+        import traceback
+        print("ERROR", e)
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/move_to", methods=["POST"])
 def api_move_to():
     """
