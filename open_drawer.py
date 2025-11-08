@@ -100,16 +100,21 @@ def pixels_to_vision_points(
     pts = []
     for (u, v) in pixels:
         if v < 0 or v >= depth_m.shape[0] or u < 0 or u >= depth_m.shape[1]:
+            print(f"Skipping pixel {(u, v)}: out of image bounds {depth_m.shape[::-1]}")
             continue
 
         z = float(depth_m[v, u])
         # We filter out points further than 2 meters away
         if z <= 0 or z > 2.0:
+            print(f"Skipping pixel {(u, v)}: invalid depth {z:.3f} m")
             continue
 
         x = (float(u) - cx) / fx * z
         y = (float(v) - cy) / fy * z
         pts.append([x, y, z, 1.0])
+
+    if not pts:
+        raise ValueError("No valid depth points for provided pixels")
 
     pts_cam = np.array(pts).T  # shape 4xN
 
@@ -391,7 +396,7 @@ def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
     # Stack and mask
     points = np.stack((x, y, z), axis=-1)[valid]
     if points.shape[0] == 0:
-        print("No points passed the depth filter! Check depth image units and max distance.")
+        raise ValueError("No valid depth data found for the provided images")
 
     # Colors: convert BGR (cv2) to RGB and normalize to [0,1]
     rgb_rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
@@ -439,7 +444,7 @@ def open_drawer(
     depth = rgbd.depth
     depth_pil = Image.fromarray(depth)
     depth_pil.save("raw_hand_camera_depth.png")
-    rr.log("drawer_rgb", rr.Image(rgb))
+    # rr.log_image("drawer_rgb", rgb)
     image_pil = Image.fromarray(rgb)
     image_pil.save("raw_hand_camera_output.jpg") 
 
@@ -472,18 +477,18 @@ def open_drawer(
 
     handle_3d_point = pixels_to_vision_points([handle_pixel], rgbd)[0]
     voxel_size = 0.005
-    rr.log("3D_points", rr.Points3D(positions=points_vision, colors=colors, radii=voxel_size/2))
+    # rr.log_points("3D_points", positions=points_vision, colors=colors, radii=voxel_size / 2)
     
     # Get pixels on surface of drawer via SAM (try just Gemini first, get 15 pixels on front of drawer)
     front_surface_pixels = get_multiple_pixels_from_gemini(prompt_get_drawer_surface_pixel, image_pil, 15)
     draw_colored_pixels(image_pil, front_surface_pixels, "annotated_hand_camera_output.jpg", "blue")
-    rr.log("drawer_pixels", rr.Image(np.array(image_pil)))
+    # rr.log_image("drawer_pixels", np.array(image_pil))
     if checkpoint == 0:
         return
 
     # Convert to 3D points on surface of drawer
     front_surface_3d_points = pixels_to_vision_points(front_surface_pixels, rgbd)
-    rr.log("surface_points", rr.Points3D(positions=front_surface_3d_points, colors=[255, 0, 0], radii=voxel_size*1.5))
+    # rr.log_points("surface_points", positions=front_surface_3d_points, colors=[255, 0, 0], radii=voxel_size * 1.5)
 
     # Fit a plane to those points via SVD and get normal vector
     _, normal_vector = fit_plane_to_points(front_surface_3d_points)
@@ -532,10 +537,14 @@ def open_drawer(
     
     move_hand_back(robot, 0.1)
 
+    drawer_image = look_into_drawer(robot, localizer)
+
     # ACTION: Stow arm
     stow_arm(robot)
     if checkpoint == 7:
-        return
+        return drawer_image
+
+    return drawer_image
     
 def look_into_drawer(robot: Robot, localizer: SpotLocalizer):
     """ 
@@ -553,19 +562,21 @@ def look_into_drawer(robot: Robot, localizer: SpotLocalizer):
     rgb = rgbds["hand_color_image"].rgb
     pil_image = Image.fromarray(rgb)
     pil_image.save("inside_drawer_camera_output.jpg") 
-    rr.log("inside_drawer_rgb", rr.Image(rgb))
+    # rr.log_image("inside_drawer_rgb", rgb)
 
-    # Call Gemini to ask what objects are in the drawer.
-    vlm = GoogleGeminiVLM("gemini-2.0-flash")
-    vlm_output_list = vlm.sample_completions(
-        prompt=prompt_get_objects_inside_drawer,
-        imgs=[pil_image],
-        temperature=0.0,  # Low temp for deterministic output
-        seed=42,
-        num_completions=1,
-    )
-    vlm_output_str = vlm_output_list[0]
-    print(vlm_output_str)
+    # # Call Gemini to ask what objects are in the drawer.
+    # vlm = GoogleGeminiVLM("gemini-2.0-flash")
+    # vlm_output_list = vlm.sample_completions(
+    #     prompt=prompt_get_objects_inside_drawer,
+    #     imgs=[pil_image],
+    #     temperature=0.0,  # Low temp for deterministic output
+    #     seed=42,
+    #     num_completions=1,
+    # )
+    # vlm_output_str = vlm_output_list[0]
+    # print(vlm_output_str)
+
+    return pil_image
 
 
 prompt_get_handle_pixel = """
