@@ -80,8 +80,13 @@ def navigate_to_relative_pose(
         mobility_feedback = (
             feedback.feedback.synchronized_feedback.mobility_command_feedback
         )
+        status_name = RobotCommandFeedbackStatus.Status.Name(mobility_feedback.status)
         if mobility_feedback.status != RobotCommandFeedbackStatus.STATUS_PROCESSING:  # pylint: disable=no-member,line-too-long
-            logging.warning("Failed to reach the goal")
+            logging.warning(
+                "Failed to reach the goal: mobility_status=%s, body_feedback=%s",
+                status_name,
+                mobility_feedback.body_movement_status,
+            )
             return
         traj_feedback = mobility_feedback.se2_trajectory_feedback
         if (
