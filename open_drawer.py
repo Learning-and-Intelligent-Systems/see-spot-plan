@@ -183,9 +183,12 @@ def grasp_orientation_from_normal(normal_vec: np.ndarray, world_up: np.ndarray =
     return quat
 
 
-def compute_body_pose_in_front_of_drawer(drawer_point: np.ndarray,
-                                         drawer_normal: np.ndarray,
-                                         standoff_dist: float = 0.8) -> math_helpers.SE2Pose:
+def compute_body_pose_in_front_of_drawer(
+    drawer_point: np.ndarray,
+    drawer_normal: np.ndarray,
+    current_body_xy: np.ndarray,
+    standoff_dist: float = 0.8,
+) -> math_helpers.SE2Pose:
     """
     Compute a 2D pose (x, y, yaw) for Spot's body to face the drawer.
 
@@ -197,13 +200,35 @@ def compute_body_pose_in_front_of_drawer(drawer_point: np.ndarray,
     Returns:
         math_helpers.SE2Pose representing where the body should move.
     """
-    # Compute body target position: move back along -normal by standoff_dist
-    body_pos = drawer_point + drawer_normal * standoff_dist
+    # Use only the horizontal component of the normal to avoid tilting effects.
+    horizontal_normal = np.array([drawer_normal[0], drawer_normal[1], 0.0])
+    norm_xy = np.linalg.norm(horizontal_normal)
+    if norm_xy < 1e-3:
+        # Fall back to the vector from the origin to the drawer point in XY.
+        horizontal_normal = np.array([drawer_point[0], drawer_point[1], 0.0])
+        norm_xy = np.linalg.norm(horizontal_normal)
+        if norm_xy < 1e-3:
+            # Final fallback: face straight along +x.
+            horizontal_normal = np.array([1.0, 0.0, 0.0])
+        else:
+            horizontal_normal /= norm_xy
+    else:
+        horizontal_normal /= norm_xy
 
-    # Compute yaw angle so body faces *toward* the drawer (along +normal)
-    yaw = np.arctan2(-drawer_normal[1], -drawer_normal[0])  # face opposite normal
+    # Flip the normal so it points towards the current body position.
+    direction_to_body = current_body_xy - drawer_point[:2]
+    if np.linalg.norm(direction_to_body) > 1e-3:
+        if np.dot(horizontal_normal[:2], direction_to_body) < 0:
+            horizontal_normal = -horizontal_normal
 
-    return math_helpers.SE2Pose(body_pos[0], body_pos[1], yaw)
+    # Compute body target position: move away from the drawer along the adjusted normal.
+    body_pos_xy = drawer_point[:2] + horizontal_normal[:2] * standoff_dist
+
+    # Compute yaw so the robot faces the drawer.
+    direction_to_drawer = drawer_point[:2] - body_pos_xy
+    yaw = np.arctan2(direction_to_drawer[1], direction_to_drawer[0])
+
+    return math_helpers.SE2Pose(body_pos_xy[0], body_pos_xy[1], yaw)
 
 
 def compute_rotated_body_pose(robot: Robot, normal_vector: Tuple[float, float]) -> math_helpers.SE2Pose:
@@ -501,7 +526,14 @@ def open_drawer(
     # rotated_body_pose = compute_rotated_body_pose(robot, normal_vector)
     # print("ROTATED POSE IS: ", rotated_body_pose)
     # navigate_to_vision_goal(robot, rotated_body_pose)
-    body_target_pose = compute_body_pose_in_front_of_drawer(handle_3d_point, normal_vector, standoff_dist)
+    robot_state = get_robot_state(robot)
+    transforms = robot_state.kinematic_state.transforms_snapshot
+    vision_tform_body = get_se2_a_tform_b(transforms, VISION_FRAME_NAME, BODY_FRAME_NAME)
+    current_body_xy = np.array([vision_tform_body.x, vision_tform_body.y])
+
+    body_target_pose = compute_body_pose_in_front_of_drawer(
+        handle_3d_point, normal_vector, current_body_xy, standoff_dist
+    )
     # print("BODY POSE IS: ", body_target_pose)
     navigate_to_vision_goal(robot, body_target_pose)
     if checkpoint == 1:
@@ -580,11 +612,11 @@ def look_into_drawer(robot: Robot, localizer: SpotLocalizer):
 
 
 prompt_get_handle_pixel = """
-    Point to the green handle of the drawer.
+    Point to the center of the large GREEN handle of the drawer.
     The answer should follow the json format: [{"point": , "label": }, ...]. The points are in [y, x] format normalized to 0-1000.
     """
 prompt_get_drawer_surface_pixel = """
-    Point to 15 points on the front face of the drawer, but avoid the drawer handles (including the green handle) or the edges of the front face.
+    Point to 15 points on the front face of the drawer, but avoid the drawer handles (including the GREEN handle) or the edges of the front face.
     Make sure the points are on the front face, not the side face.
     The answer should follow the json format: [{"point": , "label": }, ...]. The points are in [y, x] format normalized to 0-1000.
     """
@@ -639,13 +671,13 @@ if __name__ == "__main__":
     # robot = None
     # localizer = None
 
-    rr.init("open-drawer-test", spawn=True)
+    # rr.init("open-drawer-test", spawn=True)
 
     # --- Run open_drawer routine ---
     try:
         print("[INFO] Running open_drawer()...")
         open_drawer(robot, localizer, standoff_dist=1.1, body_height_offset=0.0, retreat_offset=0.4, checkpoint=7)
-        look_into_drawer(robot, localizer)
+        # look_into_drawer(robot, localizer)
 
     except Exception as e:
         print(e)
