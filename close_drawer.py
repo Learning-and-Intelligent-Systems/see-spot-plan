@@ -33,14 +33,15 @@ from open_drawer import (
 
 
 prompt_get_drawer_surface_pixel = """
-    You are looking at a cabinet with multiple drawers. One drawer is pulled OPEN and has a GREEN handle wrapped in tape.
-    Return exactly 15 points ONLY on the flat, front face of that OPEN drawer.
-    Requirements:
-    - Do NOT pick any points on the side faces or top/bottom edges.
-    - Do NOT pick points on other drawers that remain closed.
-    - Do NOT pick points on the handle or any hardware.
-    Output format: [{"point": [y, x], "label": "drawer_face"}] with coordinates normalized 0-1000.
-    """
+You are looking at a cabinet with several drawers, but only one drawer is open and it has a green handle wrapped in tape.
+Select exactly 15 points on the flat front face of that open drawer only.
+Rules:
+- Ignore all closed drawers, cabinet edges, and background objects.
+- Do not place points on the green handle, tape, hardware, or any side/top/bottom faces.
+- The points must lie entirely on the visible rectangular face that moves when the drawer is opened.
+- Do not mess up. IF you pick wrong points not on the face of the open drawer, the robot will slam into the cabinet and the lab will be down $20,000.
+Return JSON of the form [{"point": [y, x], "label": "open_drawer_face"}] with coordinates normalized to 0-1000.
+"""
 
 def _find_valid_depth_pixel(
     pixel: Tuple[int, int], depth: np.ndarray, max_radius: int = 3
@@ -66,13 +67,11 @@ def close_drawer(
     localizer,
     standoff_dist: float = 0.8,
     body_height_offset: float = 0.0,
-    advance_offset: float = 0.15, # gotta tweak this 
+    advance_offset: float = 0.5,
     checkpoint: int = 7,
 ) -> Optional[Image.Image]:
-    """Close the drawer by re-approaching, regrasping the handle, and pushing it shut."""
-
     # Retreat slightly to mirror the opening routine.
-    retreat_pose = math_helpers.SE2Pose(-advance_offset, 0.0, 0.0)
+    retreat_pose = math_helpers.SE2Pose(-0.3, 0.0, 0.0)
     navigate_to_relative_pose(robot, retreat_pose)
     if checkpoint == 0:
         return None
@@ -91,9 +90,8 @@ def close_drawer(
     depth = rgbd.depth
     depth_pil = Image.fromarray(depth)
     depth_pil.save("close_raw_hand_camera_depth.png")
-    # rr.log_image("drawer_rgb", rgb)
     image_pil = Image.fromarray(rgb)
-    image_pil.save("close_raw_hand_camera_output.jpg") 
+    image_pil.save("close_raw_hand_camera_output.jpg")
 
     # Get a 2D pixel on the handle, and convert to 3D point
     handle_pixel = get_pixel_from_gemini(prompt_get_handle_pixel, image_pil)
@@ -129,9 +127,8 @@ def close_drawer(
     # Get pixels on surface of drawer via SAM (try just Gemini first, get 15 pixels on front of drawer)
     front_surface_pixels = get_multiple_pixels_from_gemini(prompt_get_drawer_surface_pixel, image_pil, 15)
     draw_colored_pixels(image_pil, front_surface_pixels, "close_annotated_hand_camera_output.jpg", "blue")
-    # rr.log_image("drawer_pixels", np.array(image_pil))
     if checkpoint == 0:
-        return
+        return None
 
     # Convert to 3D points on surface of drawer
     front_surface_3d_points = pixels_to_vision_points(front_surface_pixels, rgbd)
@@ -159,37 +156,34 @@ def close_drawer(
     # print("BODY POSE IS: ", body_target_pose)
     navigate_to_vision_goal(robot, body_target_pose)
     if checkpoint == 1:
-        return
+        return None
 
     # # ACTION: Adjust Spot's height up and down depending on comfortable grasping position, find this param
     # set_body_height(robot, body_height_offset)
 
-    # ACTION: Grasp at pixel on handle
+    # ACTION: Grasp at pixel on handle using the original frame.
     grasp_at_pixel(robot, rgbd, handle_pixel, move_while_grasping=False)
     if checkpoint == 2:
-        return
-    
+        return None
 
-    # Compute retreat pose along normal vector
-    advance_pose = math_helpers.SE2Pose(
-        advance_offset,
-        0,
-        0
-    )
-    navigate_to_relative_pose(robot, advance_pose)
+    # Push the drawer closed by walking straight forward.
+    push_pose = math_helpers.SE2Pose(advance_offset, 0.0, 0.0)
+    navigate_to_relative_pose(robot, push_pose)
     if checkpoint == 3:
-        return
+        return None
 
     open_gripper(robot)
     if checkpoint == 4:
-        return
+        return None
 
-    move_hand_back(robot, 0.2)
+    retreat_pose = math_helpers.SE2Pose(-0.15, 0.0, 0.0)
+    navigate_to_relative_pose(robot, retreat_pose)
+
     stow_arm(robot)
     if checkpoint == 5:
-        return
+        return None
 
-    return
+    return image_pil
 
 
 if __name__ == "__main__":
@@ -221,7 +215,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--advance_offset",
         type=float,
-        default=0.4,
+        default=0.55,
         help="Distance to move while pulling/pushing the drawer (meters)",
     )
     parser.add_argument(
