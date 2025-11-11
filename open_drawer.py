@@ -473,6 +473,19 @@ def open_drawer(
     image_pil = Image.fromarray(rgb)
     image_pil.save("raw_hand_camera_output.jpg") 
 
+    # Ask Gemini if this drawer has a green handle; if not, we can't interact with it, so return None
+    vlm = GoogleGeminiVLM("gemini-2.0-flash")
+    vlm_output_list = vlm.sample_completions(
+        prompt=prompt_green_handle,
+        imgs=[image_pil],
+        temperature=0.0,  # Low temp for deterministic output
+        seed=42,
+        num_completions=1,
+    )
+    vlm_output_str = vlm_output_list[0]
+    if vlm_output_str == "No":
+        return None
+
     # Get a 2D pixel on the handle, and convert to 3D point
     handle_pixel = get_pixel_from_gemini(prompt_get_handle_pixel, image_pil)
     draw_colored_pixels(image_pil, [handle_pixel], "annotated_hand_camera_output.jpg", "red")
@@ -623,6 +636,9 @@ prompt_get_drawer_surface_pixel = """
 prompt_get_objects_inside_drawer = """
     Give me a descriptive list of objects inside this drawer.
     The answer should follow the format: ["object1", "object2", ...].
+    """
+prompt_green_handle = """
+    Does the drawer contained in this image have a green handle? Answer with only "Yes" or "No".
     """
 
 if __name__ == "__main__":
