@@ -484,6 +484,7 @@ def open_drawer(
     )
     vlm_output_str = vlm_output_list[0]
     if vlm_output_str == "No":
+        stow_arm(robot)
         return None
 
     # Get a 2D pixel on the handle, and convert to 3D point
