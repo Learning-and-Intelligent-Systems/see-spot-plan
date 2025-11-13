@@ -1,9 +1,12 @@
 from flask import Flask, request, jsonify
 from exec_plan import move_to, init, get_graph_nav_dir
 from open_drawer import open_drawer
+from close_drawer import close_drawer
+from look_into_container import look_into_container
 import argparse
 import base64
 from io import BytesIO
+from pathlib import Path
 import yaml
 
 """
@@ -122,6 +125,60 @@ def api_open_drawer():
         )
     except Exception as e:
         import traceback
+        print("ERROR:", e)
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/look_into_container", methods=["POST"])
+def api_look_into_container():
+    data = request.get_json() or {}
+
+    forward_offset = data.get("forward_offset", 0.8)
+    vertical_offset = data.get("vertical_offset", 0.6)
+    pitch_deg = data.get("pitch_deg", 85.0)
+    settle_seconds = data.get("settle_seconds", 1.5)
+    image_basename = data.get("image_basename", "container_inspection")
+    stow_after = data.get("stow_after", True)
+    open_before_capture = data.get("open_before_capture", True)
+    center_on_container = data.get("center_on_container", True)
+
+    try:
+        image = look_into_container(
+            robot,
+            localizer,
+            forward_offset=float(forward_offset),
+            vertical_offset=float(vertical_offset),
+            pitch_deg=float(pitch_deg),
+            settle_seconds=float(settle_seconds),
+            image_basename=image_basename,
+            stow_after=bool(stow_after),
+            open_before_capture=bool(open_before_capture),
+            center_on_container=bool(center_on_container),
+        )
+
+        img_buffer = BytesIO()
+        image.save(img_buffer, format="JPEG")
+        img_buffer.seek(0)
+        image_bytes = img_buffer.read()
+        encoded = base64.b64encode(image_bytes).decode("utf-8")
+
+        image_path = Path(f"{image_basename}.jpg")
+        return jsonify(
+            {
+                "status": "ok",
+                "message": "Captured container image",
+                "image": {
+                    "mime_type": "image/jpeg",
+                    "data": encoded,
+                },
+                "image_path": str(image_path),
+                "image_size": {"width": image.size[0], "height": image.size[1]},
+            }
+        )
+    except Exception as e:
+        import traceback
+
         print("ERROR:", e)
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500

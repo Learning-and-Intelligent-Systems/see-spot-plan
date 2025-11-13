@@ -246,9 +246,9 @@ if __name__ == "__main__":
         close_drawer(
             robot,
             localizer,
-            standoff_dist=args.standoff_dist,
-            body_height_offset=args.body_height_offset,
-            advance_offset=args.advance_offset,
+            standoff_dist=0.8,
+            body_height_offset=0.0,
+            advance_offset=0.55,
             checkpoint=args.checkpoint,
         )
     finally:
