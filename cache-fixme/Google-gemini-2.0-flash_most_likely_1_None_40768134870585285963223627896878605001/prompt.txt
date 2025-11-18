@@ -1,0 +1,26 @@
+
+    Point to 15 points on the front face of the drawer, but avoid the drawer handles (including the green handle) or the edges of the front face.
+    Make sure the points are on the front face, not the side face.
+    This is important. There might be multiple drawers on the cabinet. Only choose points that are on the face of the drawer currently pulled OPEN.
+    The answer should follow the json format: [{"point": , "label": }, ...]. The points are in [y, x] format normalized to 0-1000.
+    
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+```json
+[
+  {"point": [680, 625], "label": "drawer_face"},
+  {"point": [650, 348], "label": "drawer_face"},
+  {"point": [675, 485], "label": "drawer_face"},
+  {"point": [643, 509], "label": "drawer_face"},
+  {"point": [658, 600], "label": "drawer_face"},
+  {"point": [668, 409], "label": "drawer_face"},
+  {"point": [635, 656], "label": "drawer_face"},
+  {"point": [625, 381], "label": "drawer_face"},
+  {"point": [618, 556], "label": "drawer_face"},
+  {"point": [608, 456], "label": "drawer_face"},
+  {"point": [616, 685], "label": "drawer_face"},
+  {"point": [631, 315], "label": "drawer_face"},
+  {"point": [641, 432], "label": "drawer_face"},
+  {"point": [656, 550], "label": "drawer_face"},
+  {"point": [666, 653], "label": "drawer_face"}
+]
+```

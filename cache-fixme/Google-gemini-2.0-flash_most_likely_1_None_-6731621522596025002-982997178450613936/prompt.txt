@@ -1,0 +1,17 @@
+
+You are looking down at a container (bucket or box) from above.
+Find the center point of the container's opening (the center of the top rim/circle/rectangle).
+Rules:
+- The container is directly in front of the robot.
+- Ignore the robot's gripper, floor, walls, and any objects outside the container.
+- The point must be at the visual center of the container opening.
+- For circular containers, return the center of the circle.
+- For rectangular containers, return the center of the rectangle.
+Output: [{"point": [y, x], "label": "container_center"}] with coordinates normalized to 0-1000.
+
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+```json
+[
+  {"point": [559, 350], "label": "container_center"}
+]
+```

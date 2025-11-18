@@ -3,7 +3,6 @@ import time
 from datetime import datetime
 
 from bosdyn.api import arm_command_pb2, geometry_pb2, robot_command_pb2, synchronized_command_pb2
-from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
 from bosdyn.client import create_standard_sdk
 from bosdyn.client.frame_helpers import BODY_FRAME_NAME
 from bosdyn.client.lease import LeaseClient
@@ -73,15 +72,23 @@ def replay_hand_pose_data(robot, filename, rate_hz=50.0):
     command_client.robot_command(start_cmd)
     time.sleep(2.2)
     print("Starting replay with frozen body...\n")
+    print(f"Using original collection timestamps for timing (ignoring --rate parameter)")
     
-    dt = 1.0 / rate_hz
     last_gripper_value = start_gripper if start_gripper is not None else None
     
     try:
         for i, pose_data in enumerate(poses_data):
-            start_time = time.time()
+            loop_start_time = time.time()
             
             utc, x, y, z, qw, qx, qy, qz, gripper = pose_data
+            
+            if i > 0:
+                prev_utc = poses_data[i - 1][0]
+                dt = utc - prev_utc
+            else:
+                dt = 0.02
+            
+            dt = max(0.005, min(0.1, dt))
             
             arm_cmd = RobotCommandBuilder.arm_pose_command(
                 x, y, z, qw, qx, qy, qz,
@@ -113,11 +120,12 @@ def replay_hand_pose_data(robot, filename, rate_hz=50.0):
             
             if i % 50 == 0:
                 gripper_str = f", gripper={gripper:.4f}" if gripper is not None else ""
-                print(f"Step {i}: x={x:.3f}, y={y:.3f}, z={z:.3f}{gripper_str}")
+                print(f"Step {i}: x={x:.3f}, y={y:.3f}, z={z:.3f}{gripper_str} (dt={dt*1000:.1f}ms)")
             
-            elapsed = time.time() - start_time
+            elapsed = time.time() - loop_start_time
             sleep_time = max(0, dt - elapsed)
-            time.sleep(sleep_time)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
             
     except KeyboardInterrupt:
         print("\nReplay stopped.")

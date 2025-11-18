@@ -1,0 +1,29 @@
+
+    You are looking at a cabinet with multiple drawers. One drawer is pulled OPEN and has a GREEN handle wrapped in tape.
+    Return exactly 15 points ONLY on the flat, front face of that OPEN drawer.
+    Requirements:
+    - Do NOT pick any points on the side faces or top/bottom edges.
+    - Do NOT pick points on other drawers that remain closed.
+    - Do NOT pick points on the handle or any hardware.
+    Output format: [{"point": [y, x], "label": "drawer_face"}] with coordinates normalized 0-1000.
+    
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+```json
+[
+  {"point": [590, 350], "label": "drawer_face"},
+  {"point": [680, 380], "label": "drawer_face"},
+  {"point": [550, 500], "label": "drawer_face"},
+  {"point": [650, 520], "label": "drawer_face"},
+  {"point": [580, 650], "label": "drawer_face"},
+  {"point": [700, 650], "label": "drawer_face"},
+  {"point": [570, 750], "label": "drawer_face"},
+  {"point": [670, 720], "label": "drawer_face"},
+  {"point": [590, 450], "label": "drawer_face"},
+  {"point": [690, 480], "label": "drawer_face"},
+  {"point": [560, 600], "label": "drawer_face"},
+  {"point": [660, 600], "label": "drawer_face"},
+  {"point": [580, 700], "label": "drawer_face"},
+  {"point": [680, 680], "label": "drawer_face"},
+  {"point": [600, 500], "label": "drawer_face"}
+]
+```

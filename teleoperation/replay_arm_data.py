@@ -23,8 +23,8 @@ def replay_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             
             parts = line.strip().split(',')
             timestep = int(parts[0])
-            joint_positions = [float(p) for p in parts[1:7]]
-            gripper_value = float(parts[7]) if len(parts) > 7 else None
+            joint_positions = [float(p.strip()) for p in parts[1:7]]
+            gripper_value = float(parts[7].strip()) if len(parts) > 7 else None
             positions_data.append((timestep, joint_positions, gripper_value))
     
     has_gripper_data = positions_data[0][2] is not None
@@ -40,6 +40,7 @@ def replay_arm_data(robot, filename, rate_hz=50.0, window_size=3):
     
     print("Moving to start position...")
     start_positions = positions_data[0][1]
+    start_gripper = positions_data[0][2] if has_gripper_data else None
     start_point = RobotCommandBuilder.create_arm_joint_trajectory_point(
         start_positions[0], start_positions[1], start_positions[2],
         start_positions[3], start_positions[4], start_positions[5],
@@ -48,14 +49,23 @@ def replay_arm_data(robot, filename, rate_hz=50.0, window_size=3):
     start_traj = arm_command_pb2.ArmJointTrajectory(points=[start_point])
     start_move = arm_command_pb2.ArmJointMoveCommand.Request(trajectory=start_traj)
     start_arm_cmd = arm_command_pb2.ArmCommand.Request(arm_joint_move_command=start_move)
-    start_sync = synchronized_command_pb2.SynchronizedCommand.Request(arm_command=start_arm_cmd)
+    
+    if has_gripper_data and start_gripper is not None:
+        start_gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(start_gripper)
+        start_sync = synchronized_command_pb2.SynchronizedCommand.Request(
+            arm_command=start_arm_cmd,
+            gripper_command=start_gripper_cmd.synchronized_command.gripper_command
+        )
+    else:
+        start_sync = synchronized_command_pb2.SynchronizedCommand.Request(arm_command=start_arm_cmd)
+    
     start_robot_cmd = robot_command_pb2.RobotCommand(synchronized_command=start_sync)
     command_client.robot_command(start_robot_cmd)
     time.sleep(2.2)
     print("Starting replay...\n")
     
     dt = 1.0 / rate_hz
-    last_gripper_value = None
+    last_gripper_value = start_gripper if start_gripper is not None else None
     
     try:
         i = 0
@@ -94,17 +104,12 @@ def replay_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             )
             
             current_gripper = positions_data[i][2]
-            gripper_command = None
             
             if has_gripper_data and current_gripper is not None:
-                if last_gripper_value is None or abs(current_gripper - last_gripper_value) > 0.05:
-                    gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(
-                        current_gripper
-                    )
-                    gripper_command = gripper_cmd.synchronized_command.gripper_command
-                    last_gripper_value = current_gripper
-            
-            if gripper_command is not None:
+                gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(
+                    current_gripper
+                )
+                gripper_command = gripper_cmd.synchronized_command.gripper_command
                 sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
                     arm_command=arm_command,
                     gripper_command=gripper_command
@@ -149,7 +154,7 @@ def main():
 
     # CHANGE THIS FILE TO REPLAY THE MOTION!
     # YOUR FILE SHOULD BE IN THE 'teleoperation_data' FOLDER!
-    replay_arm_data(robot, "teleoperation_data/arm_joints_20251030_133619.txt")
+    replay_arm_data(robot, "teleoperation_data/arm_joints_20251117_165048.txt")
 
 
 if __name__ == "__main__":

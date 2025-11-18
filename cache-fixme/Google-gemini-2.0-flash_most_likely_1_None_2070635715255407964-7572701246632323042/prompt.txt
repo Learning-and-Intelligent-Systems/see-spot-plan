@@ -1,0 +1,47 @@
+
+You are looking down at a container from above. You CANNOT clearly see inside the container to view its contents.
+
+Your goal: Adjust the camera position AND angle to get a better view INSIDE the container so you can see the bottom and all contents.
+
+CRITICAL: If the bottom of the container is cut off or not visible:
+1. INCREASE pitch to 90 degrees (straight down) - this allows you to look directly into the container
+2. MOVE BACK (negative shift_y) - moving the camera away from the container helps see deeper inside
+3. These two actions together maximize your ability to see the bottom and contents
+
+Analyze the current view:
+- Is the bottom of the container cut off or not visible? → Increase pitch to 90 degrees AND move back
+- Are container walls blocking the view of bottom? → Increase pitch significantly (aim for 90 degrees) AND move back slightly
+- Is the container opening centered in the frame? If not, shift to center it.
+- Can you see down into the container? If not:
+  * INCREASE pitch to look more straight down (up to 90 degrees)
+  * MOVE BACK (negative shift_y) to increase viewing distance into container
+- Are contents partially hidden? Shift to reveal hidden areas.
+- Is the container cut off at image edges? Shift away from that edge.
+
+Movement rules:
+- "shift_x": positive = move camera RIGHT (to see more of LEFT side/contents), negative = move LEFT (to see more of RIGHT side)
+- "shift_y": positive = move camera FORWARD/away from robot (to see more of BACK of container), negative = move BACK/toward robot (to see more of FRONT and deeper into container)
+- "pitch_adjustment": adjustment to pitch angle in degrees
+  * Positive = increase pitch (look MORE straight down, deeper into container)
+  * Negative = decrease pitch (look less down, more horizontal)
+  * Range: -10 to +30 degrees (can go up to 90 degrees total)
+  * If bottom is cut off or not visible: use +15 to +30 degrees (aim for 90 degrees total)
+  * If walls are blocking view: use +10 to +20 degrees
+  * If already at 90 degrees, focus on shift_x/shift_y and shift_y (moving back)
+
+Values: -1.0 to 1.0 for shift_x/shift_y
+  - 0.1-0.3 = small adjustment (slightly off-center but mostly visible)
+  - 0.4-0.6 = medium adjustment (container partially obscured or significantly off-center)
+  - 0.7-1.0 = large adjustment (container cut off, major obstruction, or can't see inside at all)
+  - For bottom cut off: use shift_y = -0.3 to -0.6 (move back to see deeper)
+
+Priority (in order):
+1. If bottom is cut off or not visible → pitch_adjustment = +15 to +30 degrees AND shift_y = -0.3 to -0.6 (move back)
+2. If walls are blocking view of bottom → pitch_adjustment = +10 to +20 degrees AND shift_y = -0.2 to -0.4 (move back)
+3. If container is off-center → shift to center (shift_x)
+4. If can't see contents → combine pitch increase with moving back and centering
+
+Output format: {"shift_x": float, "shift_y": float, "pitch_adjustment": float, "explanation": "detailed reason for this adjustment"}
+
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+{"shift_x": 0.0, "shift_y": -0.4, "pitch_adjustment": 30.0, "explanation": "The bottom of the container is cut off. Increasing the pitch to 90 degrees and moving back will allow us to see the bottom and contents better."}

@@ -1,0 +1,25 @@
+
+    Point to 15 points on the front face of the drawer, but avoid the drawer handles (including the GREEN handle) or the edges of the front face.
+    Make sure the points are on the front face, not the side face.
+    The answer should follow the json format: [{"point": , "label": }, ...]. The points are in [y, x] format normalized to 0-1000.
+    
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+```json
+[
+  {"point": [350, 612], "label": "drawer"},
+  {"point": [650, 693], "label": "drawer"},
+  {"point": [895, 612], "label": "drawer"},
+  {"point": [300, 450], "label": "drawer"},
+  {"point": [325, 750], "label": "drawer"},
+  {"point": [550, 350], "label": "drawer"},
+  {"point": [575, 750], "label": "drawer"},
+  {"point": [825, 450], "label": "drawer"},
+  {"point": [850, 750], "label": "drawer"},
+  {"point": [375, 500], "label": "drawer"},
+  {"point": [625, 500], "label": "drawer"},
+  {"point": [875, 500], "label": "drawer"},
+  {"point": [350, 350], "label": "drawer"},
+  {"point": [575, 500], "label": "drawer"},
+  {"point": [825, 350], "label": "drawer"}
+]
+```

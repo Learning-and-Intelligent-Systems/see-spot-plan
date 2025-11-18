@@ -1,0 +1,30 @@
+
+You are looking at a cabinet with several drawers, but only one drawer is open and it has a green handle wrapped in tape.
+Select exactly 15 points on the flat front face of that open drawer only.
+Rules:
+- Ignore all closed drawers, cabinet edges, and background objects.
+- Do not place points on the green handle, tape, hardware, or any side/top/bottom faces.
+- The points must lie entirely on the visible rectangular face that moves when the drawer is opened.
+- Do not mess up. IF you pick wrong points not on the face of the open drawer, the robot will slam into the cabinet and the lab will be down $20,000.
+Return JSON of the form [{"point": [y, x], "label": "open_drawer_face"}] with coordinates normalized to 0-1000.
+
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+```json
+[
+  {"point": [550, 300], "label": "open_drawer_face"},
+  {"point": [600, 400], "label": "open_drawer_face"},
+  {"point": [650, 200], "label": "open_drawer_face"},
+  {"point": [700, 300], "label": "open_drawer_face"},
+  {"point": [500, 400], "label": "open_drawer_face"},
+  {"point": [550, 500], "label": "open_drawer_face"},
+  {"point": [600, 600], "label": "open_drawer_face"},
+  {"point": [650, 400], "label": "open_drawer_face"},
+  {"point": [700, 500], "label": "open_drawer_face"},
+  {"point": [500, 600], "label": "open_drawer_face"},
+  {"point": [550, 700], "label": "open_drawer_face"},
+  {"point": [600, 800], "label": "open_drawer_face"},
+  {"point": [650, 600], "label": "open_drawer_face"},
+  {"point": [700, 700], "label": "open_drawer_face"},
+  {"point": [500, 800], "label": "open_drawer_face"}
+]
+```

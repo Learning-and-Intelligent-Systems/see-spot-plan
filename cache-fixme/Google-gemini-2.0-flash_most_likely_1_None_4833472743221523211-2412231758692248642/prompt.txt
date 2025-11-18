@@ -1,0 +1,10 @@
+
+    Point to the center of the large GREEN handle of the drawer.
+    The answer should follow the json format: [{"point": , "label": }, ...]. The points are in [y, x] format normalized to 0-1000.
+    
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+```json
+[
+  {"point": [600, 652], "label": "center"}
+]
+```

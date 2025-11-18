@@ -1,0 +1,18 @@
+
+You are looking down at a container (bucket or box) from above.
+Determine if the entire interior of the container is clearly visible in this image.
+Rules:
+- The interior should be fully visible, not cut off by the edges of the image
+- You should be able to see the bottom and sides of the container interior
+- The container opening should be centered or mostly centered in the frame
+- Ignore the robot's gripper if it's partially visible
+
+Output JSON with:
+- "fully_visible": true if the entire container interior is visible, false otherwise
+- "reason": brief explanation of why it's not fully visible (if applicable)
+- "needs_adjustment": true if the camera position needs to be adjusted
+
+Output format: {"fully_visible": true/false, "reason": "string", "needs_adjustment": true/false}
+
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+{"fully_visible": true, "reason": "", "needs_adjustment": false}

@@ -1,0 +1,27 @@
+
+You are looking down at a container from above. You CANNOT clearly see inside the container to view its contents.
+
+Your goal: Move the camera to get a better view INSIDE the container so you can see the bottom and all contents.
+
+Analyze the current view:
+- Is the container opening centered in the frame? If not, shift to center it.
+- Can you see down into the container? If container walls are blocking the view, shift to look more directly into the opening.
+- Are contents partially hidden? Shift to reveal hidden areas.
+- Is the container cut off at image edges? Shift away from that edge.
+
+Movement rules:
+- "shift_x": positive = move camera right (to see more of left side/contents), negative = move left (to see more of right side/contents)
+- "shift_y": positive = move camera forward/away from robot (to see more of back of container), negative = move back/toward robot (to see more of front)
+- Values: -1.0 to 1.0
+  - 0.1-0.3 = small adjustment (slightly off-center but mostly visible)
+  - 0.4-0.6 = medium adjustment (container partially obscured or significantly off-center)
+  - 0.7-1.0 = large adjustment (container cut off, major obstruction, or can't see inside at all)
+
+Priority: Always prioritize being able to SEE INTO the container over perfect centering. If you can't see the bottom or contents are hidden, make larger adjustments.
+
+Output format: {"shift_x": float, "shift_y": float, "explanation": "detailed reason for this adjustment"}
+
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+```json
+{"shift_x": 0.2, "shift_y": 0.2, "explanation": "The container is slightly to the left. Shifting right and forward will center it better and allow a better view inside."}
+```

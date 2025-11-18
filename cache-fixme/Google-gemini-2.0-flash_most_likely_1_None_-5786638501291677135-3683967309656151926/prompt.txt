@@ -1,0 +1,5 @@
+
+    Does the drawer contained in this image have a green handle? Answer with only "Yes" or "No".
+    
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+No

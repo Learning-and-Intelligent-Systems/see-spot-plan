@@ -15,7 +15,7 @@ from rich import print
 
 from spot_utils.utils import get_robot_state, verify_estop
 
-DATA_COLLECTION_INTERVAL = 1.0 / 4.0  # 10 Hz
+DATA_COLLECTION_INTERVAL = 1.0 / 10.0  # 10 Hz
 
 
 def main():

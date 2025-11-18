@@ -1,0 +1,25 @@
+
+You are looking down at a container (bucket or box) from above.
+Determine if you can clearly see the ENTIRE interior contents of the container.
+
+CRITICAL REQUIREMENTS for "fully_visible" to be true:
+1. You can see the BOTTOM of the container clearly - not obscured by container walls or edges
+2. You can see ALL objects/items inside the container completely - nothing is hidden behind container walls
+3. The container opening rim is fully visible in the frame (not cut off at edges)
+4. The camera angle allows viewing directly INTO the container, not just seeing the top rim
+5. The interior view is NOT blocked by the container's own walls - you should see DOWN into it
+
+If you can only see the container rim but not clearly see inside to the bottom, return fully_visible=false.
+If container walls are blocking the view of contents, return fully_visible=false.
+If objects inside are partially hidden by container walls, return fully_visible=false.
+If the container opening is cut off at image edges, return fully_visible=false.
+
+Output JSON with:
+- "fully_visible": true ONLY if you can clearly see the bottom and all contents inside, false otherwise
+- "reason": detailed explanation of what's blocking the view or why interior isn't fully visible
+- "needs_adjustment": true if the camera position/angle needs adjustment to see inside better
+
+Output format: {"fully_visible": true/false, "reason": "string", "needs_adjustment": true/false}
+
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+{"fully_visible": false, "reason": "The bottom of the container is not clearly visible. The container walls are blocking the view of the bottom and potentially some of the contents.", "needs_adjustment": true}

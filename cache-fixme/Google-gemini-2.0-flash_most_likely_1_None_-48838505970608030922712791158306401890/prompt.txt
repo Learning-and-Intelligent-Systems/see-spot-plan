@@ -1,0 +1,10 @@
+
+    Point to the green handle or neon orange handle of the drawer.
+    The answer should follow the json format: [{"point": , "label": }, ...]. The points are in [y, x] format normalized to 0-1000.
+    
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+```json
+[
+  {"point": [632, 502], "label": "neon orange handle"}
+]
+```

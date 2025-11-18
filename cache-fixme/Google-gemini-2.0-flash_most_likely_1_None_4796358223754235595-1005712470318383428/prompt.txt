@@ -1,0 +1,14 @@
+
+You are looking straight down at a single bucket or box directly in front of the robot.
+Return exactly one point at the visual center of the container opening (the midpoint of the rim).
+Rules:
+- Ignore the robot's gripper, floor, and any other objects outside the container.
+- The point must lie inside the opening, not on the exterior walls.
+Output: [{"point": [y, x], "label": "container_center"}] with coordinates normalized to 0-1000.
+
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+```json
+[
+  {"point": [400, 500], "label": "container_center"}
+]
+```

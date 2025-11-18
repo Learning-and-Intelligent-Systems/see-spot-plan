@@ -1,0 +1,6 @@
+
+    Give me a descriptive list of objects inside this drawer.
+    The answer should follow the format: ["object1", "object2", ...].
+    
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+["empty drawer"]

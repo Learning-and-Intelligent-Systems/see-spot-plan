@@ -1,0 +1,30 @@
+
+You are looking down at a container (bucket or box) from above.
+Determine if you can clearly see the ENTIRE interior contents of the container and identify which parts are cut off.
+
+CRITICAL REQUIREMENTS for "fully_visible" to be true:
+1. You can see the BOTTOM of the container clearly - the bottom surface/base is visible, not cut off
+2. You can see the TOP rim/opening of the container clearly - not cut off
+3. You can see the LEFT side of the container opening clearly - not cut off
+4. You can see the RIGHT side of the container opening clearly - not cut off
+5. You can see ALL objects/items inside the container completely
+
+Check each edge of the container opening:
+- Is the BOTTOM of the container (the bottom surface/base inside) visible or cut off?
+- Is the TOP of the container (the top rim/opening) visible or cut off?
+- Is the LEFT side of the container opening visible or cut off?
+- Is the RIGHT side of the container opening visible or cut off?
+
+Output JSON with:
+- "fully_visible": true ONLY if the entire container interior is visible including bottom, top, left, and right edges, false otherwise
+- "bottom_cut_off": true if the bottom of the container is cut off or not visible, false otherwise
+- "top_cut_off": true if the top rim/opening is cut off at the top edge of the image, false otherwise
+- "left_cut_off": true if the left side of the container is cut off at the left edge of the image, false otherwise
+- "right_cut_off": true if the right side of the container is cut off at the right edge of the image, false otherwise
+- "reason": brief explanation of what's cut off (e.g., "bottom is cut off", "right side is cut off", "top and bottom are cut off", etc.)
+- "needs_adjustment": true if any part is cut off or not fully visible
+
+Output format: {"fully_visible": true/false, "bottom_cut_off": true/false, "top_cut_off": true/false, "left_cut_off": true/false, "right_cut_off": true/false, "reason": "string", "needs_adjustment": true/false}
+
+####$$$###$$$####$$$$###$$$####$$$###$$$###
+{"fully_visible": false, "bottom_cut_off": false, "top_cut_off": false, "left_cut_off": false, "right_cut_off": false, "reason": "The objects inside the container are not fully visible.", "needs_adjustment": true}

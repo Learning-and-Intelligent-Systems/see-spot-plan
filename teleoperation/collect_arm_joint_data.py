@@ -61,6 +61,9 @@ def get_arm_data():
                 
                 gripper_raw = robot_state.manipulator_state.gripper_open_percentage
                 gripper_normalized = gripper_raw / 100.0
+                gripper_normalized = max(0.0, min(1.0, gripper_normalized))
+                if gripper_normalized < 0.02:
+                    gripper_normalized = 0.0
                 
                 gripper_status = "OPEN" if gripper_normalized > 0.8 else ("CLOSING" if gripper_normalized > 0.2 else "CLOSED")
                 print(f"  gripper: {gripper_normalized:.4f} [{gripper_status}] (raw={gripper_raw:.1f})")
