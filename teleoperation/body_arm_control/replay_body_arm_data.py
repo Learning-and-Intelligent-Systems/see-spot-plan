@@ -119,13 +119,7 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
         
         print(f"Moving body to start position: x={start_body_x:.3f}, y={start_body_y:.3f}, z={start_body_z:.3f} m, yaw={start_body_yaw:.3f} rad")
         
-        # Get current body pose
-        robot_state = get_robot_state(robot)
-        odom_tform_body = get_odom_tform_body(robot_state.kinematic_state.transforms_snapshot)
-        current_body_z = odom_tform_body.position.z
-        initial_body_z = current_body_z
-        
-        # Move body to start position (x, y, yaw)
+        # Move body to start position (x, y, yaw) first
         if start_body_x is not None and start_body_y is not None and start_body_yaw is not None:
             body_pose_cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
                 goal_x=start_body_x,
@@ -133,21 +127,46 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 goal_heading=start_body_yaw,
                 frame_name=ODOM_FRAME_NAME
             )
-            command_client.robot_command(body_pose_cmd)
-            time.sleep(2.0)
+            cmd_id = command_client.robot_command(body_pose_cmd)
+            
+            # Wait for SE2 command to complete
+            timeout = 5.0
+            start_wait = time.time()
+            while time.time() - start_wait < timeout:
+                try:
+                    feedback = command_client.robot_command_feedback(cmd_id)
+                    mobility_feedback = feedback.feedback.synchronized_feedback.mobility_command_feedback
+                    if hasattr(mobility_feedback, 'se2_trajectory_feedback'):
+                        if mobility_feedback.se2_trajectory_feedback.status == 2:  # STATUS_AT_GOAL
+                            break
+                except:
+                    pass
+                time.sleep(0.1)
+            time.sleep(0.5)
+        
+        # Get current body pose AFTER SE2 command has completed
+        robot_state = get_robot_state(robot)
+        odom_tform_body = get_odom_tform_body(robot_state.kinematic_state.transforms_snapshot)
+        current_body_z = odom_tform_body.position.z
+        initial_body_z = current_body_z
         
         # Set body height and orientation to match start position
+        # footprint_R_body controls body orientation relative to footprint (mainly roll/pitch)
+        # Yaw is already handled by SE2 command, so we only use roll and pitch here
         if start_body_z is not None:
             height_offset = start_body_z - current_body_z
             height_offset = max(-0.2, min(0.2, height_offset))
             
-            # Compute footprint_R_body from yaw/roll/pitch
+            # Only use roll and pitch in footprint_R_body, not yaw (yaw handled by SE2)
+            # footprint_R_body yaw should be 0 (body aligned with footprint)
             footprint_R_body = None
-            if start_body_yaw is not None and start_body_roll is not None and start_body_pitch is not None:
-                footprint_R_body = EulerZXY(yaw=start_body_yaw, roll=start_body_roll, pitch=start_body_pitch)
+            if start_body_roll is not None and start_body_pitch is not None:
+                footprint_R_body = EulerZXY(yaw=0.0, roll=start_body_roll, pitch=start_body_pitch)
             
             if abs(height_offset) > 0.001 or footprint_R_body is not None:
                 print(f"Adjusting body height: offset={height_offset:.3f} m")
+                if footprint_R_body is not None:
+                    print(f"  Setting body orientation: roll={start_body_roll:.3f} rad, pitch={start_body_pitch:.3f} rad")
                 stand_cmd = RobotCommandBuilder.synchro_stand_command(
                     body_height=height_offset,
                     footprint_R_body=footprint_R_body
@@ -353,10 +372,11 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 # Body is stationary but height needs to change - use stand command
                 # This works when combined with arm commands without SE2 movement
                 
-                # Compute footprint_R_body from yaw/roll/pitch
+                # Only use roll and pitch in footprint_R_body, not yaw (yaw handled by SE2 if body moves)
+                # footprint_R_body yaw should be 0 (body aligned with footprint)
                 footprint_R_body = None
-                if body_yaw is not None and body_roll is not None and body_pitch is not None:
-                    footprint_R_body = EulerZXY(yaw=body_yaw, roll=body_roll, pitch=body_pitch)
+                if body_roll is not None and body_pitch is not None:
+                    footprint_R_body = EulerZXY(yaw=0.0, roll=body_roll, pitch=body_pitch)
                 
                 stand_cmd = RobotCommandBuilder.synchro_stand_command(
                     body_height=height_offset,
@@ -423,10 +443,11 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                         height_offset_followup = body_z - initial_body_z
                         height_offset_followup = max(-0.2, min(0.2, height_offset_followup))
                         
-                        # Compute footprint_R_body from yaw/roll/pitch
+                        # Only use roll and pitch in footprint_R_body, not yaw (yaw handled by SE2)
+                        # footprint_R_body yaw should be 0 (body aligned with footprint)
                         footprint_R_body_followup = None
-                        if body_yaw is not None and body_roll is not None and body_pitch is not None:
-                            footprint_R_body_followup = EulerZXY(yaw=body_yaw, roll=body_roll, pitch=body_pitch)
+                        if body_roll is not None and body_pitch is not None:
+                            footprint_R_body_followup = EulerZXY(yaw=0.0, roll=body_roll, pitch=body_pitch)
                         
                         stand_cmd_followup = RobotCommandBuilder.synchro_stand_command(
                             body_height=height_offset_followup,
@@ -537,7 +558,7 @@ def main():
     
     # CHANGE THIS FILE TO REPLAY THE MOTION!
     # YOUR FILE SHOULD BE IN THE 'teleoperation_data' FOLDER!
-    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251118_144535.txt")
+    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251118_181719.txt")
 
 
 if __name__ == "__main__":
