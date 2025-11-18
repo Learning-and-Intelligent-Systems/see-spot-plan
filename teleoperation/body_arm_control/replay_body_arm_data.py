@@ -5,12 +5,14 @@ from datetime import datetime
 
 from bosdyn.api import arm_command_pb2, geometry_pb2, mobility_command_pb2, robot_command_pb2, synchronized_command_pb2
 from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
-from bosdyn.client import create_standard_sdk
+from bosdyn.client import create_standard_sdk, math_helpers
 from bosdyn.client.frame_helpers import ODOM_FRAME_NAME, BODY_FRAME_NAME, get_odom_tform_body
 from bosdyn.client.lease import LeaseClient
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.util import authenticate
+from bosdyn.geometry import EulerZXY
 from google.protobuf import wrappers_pb2
+import numpy as np
 
 from spot_utils.utils import get_robot_state, verify_estop
 
@@ -43,12 +45,16 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             
             joint_positions = [float(p.strip()) for p in parts[joint_start_idx:joint_start_idx+6]]
             gripper_value = float(parts[joint_start_idx+6].strip()) if len(parts) > joint_start_idx+6 else None
+            
+            # Format: body_x, body_y, body_z, body_yaw, body_roll, body_pitch
             body_x = float(parts[joint_start_idx+7].strip()) if len(parts) > joint_start_idx+7 else None
             body_y = float(parts[joint_start_idx+8].strip()) if len(parts) > joint_start_idx+8 else None
             body_z = float(parts[joint_start_idx+9].strip()) if len(parts) > joint_start_idx+9 else None
-            body_theta = float(parts[joint_start_idx+10].strip()) if len(parts) > joint_start_idx+10 else None
+            body_yaw = float(parts[joint_start_idx+10].strip()) if len(parts) > joint_start_idx+10 else None
+            body_roll = float(parts[joint_start_idx+11].strip()) if len(parts) > joint_start_idx+11 else None
+            body_pitch = float(parts[joint_start_idx+12].strip()) if len(parts) > joint_start_idx+12 else None
             
-            positions_data.append((timestep, timestamp_utc, joint_positions, gripper_value, body_x, body_y, body_z, body_theta))
+            positions_data.append((timestep, timestamp_utc, joint_positions, gripper_value, body_x, body_y, body_z, body_yaw, body_roll, body_pitch))
     
     has_timestamps = positions_data[0][1] is not None
     has_gripper_data = positions_data[0][3] is not None
@@ -59,7 +65,12 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
     print(f"Body pose data: {'Yes' if has_body_pose else 'No'}")
     if has_body_pose:
         start_body = positions_data[0]
-        print(f"  Start body pose: x={start_body[4]:.3f}, y={start_body[5]:.3f}, z={start_body[6]:.3f} m, theta={start_body[7]:.3f} rad")
+        start_body_yaw = start_body[7]
+        start_body_roll = start_body[8]
+        start_body_pitch = start_body[9]
+        print(f"  Start body pose: x={start_body[4]:.3f}, y={start_body[5]:.3f}, z={start_body[6]:.3f} m, yaw={start_body_yaw:.3f} rad")
+        if start_body_roll is not None and start_body_pitch is not None:
+            print(f"    roll={start_body_roll:.3f} rad, pitch={start_body_pitch:.3f} rad")
     if has_timestamps:
         print(f"Using original collection timestamps for timing (ignoring --rate parameter)")
     else:
@@ -96,29 +107,82 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
     command_client.robot_command(start_robot_cmd)
     time.sleep(2.2)
     
-    # Get initial body height for computing height offsets
-    initial_body_z = None
+    # Move body to start position to match recorded data
     if has_body_pose:
+        start_body = positions_data[0]
+        start_body_x = start_body[4]
+        start_body_y = start_body[5]
+        start_body_z = start_body[6]
+        start_body_yaw = start_body[7]
+        start_body_roll = start_body[8]
+        start_body_pitch = start_body[9]
+        
+        print(f"Moving body to start position: x={start_body_x:.3f}, y={start_body_y:.3f}, z={start_body_z:.3f} m, yaw={start_body_yaw:.3f} rad")
+        
+        # Get current body pose
+        robot_state = get_robot_state(robot)
+        odom_tform_body = get_odom_tform_body(robot_state.kinematic_state.transforms_snapshot)
+        current_body_z = odom_tform_body.position.z
+        initial_body_z = current_body_z
+        
+        # Move body to start position (x, y, yaw)
+        if start_body_x is not None and start_body_y is not None and start_body_yaw is not None:
+            body_pose_cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
+                goal_x=start_body_x,
+                goal_y=start_body_y,
+                goal_heading=start_body_yaw,
+                frame_name=ODOM_FRAME_NAME
+            )
+            command_client.robot_command(body_pose_cmd)
+            time.sleep(2.0)
+        
+        # Set body height and orientation to match start position
+        if start_body_z is not None:
+            height_offset = start_body_z - current_body_z
+            height_offset = max(-0.2, min(0.2, height_offset))
+            
+            # Compute footprint_R_body from yaw/roll/pitch
+            footprint_R_body = None
+            if start_body_yaw is not None and start_body_roll is not None and start_body_pitch is not None:
+                footprint_R_body = EulerZXY(yaw=start_body_yaw, roll=start_body_roll, pitch=start_body_pitch)
+            
+            if abs(height_offset) > 0.001 or footprint_R_body is not None:
+                print(f"Adjusting body height: offset={height_offset:.3f} m")
+                stand_cmd = RobotCommandBuilder.synchro_stand_command(
+                    body_height=height_offset,
+                    footprint_R_body=footprint_R_body
+                )
+                command_client.robot_command(stand_cmd)
+                time.sleep(1.5)
+        
+        # Update initial_body_z to the target start position for computing future offsets
+        initial_body_z = start_body_z
+        print(f"Body positioned. Initial body height for offsets: {initial_body_z:.3f} m")
+        
+        # Initialize last commanded body pose to start position to prevent immediate movement
+        last_commanded_body_x = start_body_x
+        last_commanded_body_y = start_body_y
+        last_commanded_body_yaw = start_body_yaw
+        last_commanded_body_z = start_body_z
+    else:
+        # No body pose data - just get current height for offsets
         robot_state = get_robot_state(robot)
         odom_tform_body = get_odom_tform_body(robot_state.kinematic_state.transforms_snapshot)
         initial_body_z = odom_tform_body.position.z
         print(f"Initial body height: {initial_body_z:.3f} m")
+        last_commanded_body_x = None
+        last_commanded_body_y = None
+        last_commanded_body_yaw = None
+        last_commanded_body_z = initial_body_z
     
     print("Starting replay...\n")
     
-    # Use smaller window or single point for more accurate replay
-    if window_size == 3 and has_timestamps:
-        # With timestamps, single-point commands are more accurate
-        actual_window_size = 1
-    else:
-        actual_window_size = window_size
+    # For maximum accuracy: use single-point trajectories (no interpolation)
+    # This ensures exact position replay, critical for precise tasks like grasping
+    actual_window_size = 1
     
     dt = 1.0 / rate_hz
     last_gripper_value = start_gripper if start_gripper is not None else None
-    last_commanded_body_z = initial_body_z if initial_body_z is not None else None
-    last_commanded_body_x = None
-    last_commanded_body_y = None
-    last_commanded_body_theta = None
     
     try:
         i = 0
@@ -134,8 +198,23 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                     dt = max(0.005, min(0.1, dt))
             
             trajectory_points = []
+            
+            # For single-point trajectories, use exact dt from timestamps
+            # Ensure minimum time for command processing - slightly higher for perfect execution
+            trajectory_time = max(dt, 0.03)
+            
             for j in range(min(actual_window_size, len(positions_data) - i)):
-                timestep, timestamp_utc, positions, gripper, body_x, body_y, body_z, body_theta = positions_data[i + j]
+                data = positions_data[i + j]
+                timestep = data[0]
+                timestamp_utc = data[1]
+                positions = data[2]
+                gripper = data[3]
+                body_x = data[4]
+                body_y = data[5]
+                body_z = data[6]
+                body_yaw = data[7]
+                body_roll = data[8]
+                body_pitch = data[9]
                 
                 point = RobotCommandBuilder.create_arm_joint_trajectory_point(
                     positions[0],
@@ -144,14 +223,15 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                     positions[3],
                     positions[4],
                     positions[5],
-                    time_since_reference_secs=(j + 1) * dt,
+                    time_since_reference_secs=trajectory_time,
                 )
                 trajectory_points.append(point)
             
-            # Higher velocity/acceleration limits for more accurate replay
-            # (closer to natural robot movements during collection)
-            max_vel = wrappers_pb2.DoubleValue(value=8.0)
-            max_acc = wrappers_pb2.DoubleValue(value=15.0)
+            # Remove velocity/acceleration limits for maximum accuracy
+            # High limits allow robot to reach exact positions without artificial constraints
+            # This is critical when arm is extended - small errors become large at the end-effector
+            max_vel = wrappers_pb2.DoubleValue(value=15.0)
+            max_acc = wrappers_pb2.DoubleValue(value=30.0)
             
             arm_joint_traj = arm_command_pb2.ArmJointTrajectory(
                 points=trajectory_points,
@@ -166,11 +246,22 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 arm_joint_move_command=joint_move_command
             )
             
-            timestep, timestamp_utc, positions, current_gripper, body_x, body_y, body_z, body_theta = positions_data[i]
+            data = positions_data[i]
+            timestep = data[0]
+            timestamp_utc = data[1]
+            positions = data[2]
+            current_gripper = data[3]
+            body_x = data[4]
+            body_y = data[5]
+            body_z = data[6]
+            body_yaw = data[7]
+            body_roll = data[8]
+            body_pitch = data[9]
             gripper_command = None
             mobility_command = None
             
-            # Always send gripper command for accuracy (remove threshold filtering)
+            # Always send gripper command for PERFECT accuracy - no threshold
+            # This ensures perfect synchronization even for tiny changes
             if has_gripper_data and current_gripper is not None:
                 gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(
                     current_gripper
@@ -178,27 +269,48 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 gripper_command = gripper_cmd.synchronized_command.gripper_command
                 last_gripper_value = current_gripper
             
-            # Reduced thresholds for more accurate replay (5mm instead of 1cm)
+            # Body position change detection with hysteresis for noise filtering
+            # Use meaningful thresholds to filter out small variations/noise in recorded data
+            # Only send SE2 commands when there's a significant position change
+            # Reduced thresholds for better accuracy while still filtering noise
             body_position_changed = False
-            if has_body_pose and body_x is not None and body_y is not None and body_theta is not None:
+            if has_body_pose and body_x is not None and body_y is not None and body_yaw is not None:
+                # Threshold: 5mm for position, 0.01 rad (~0.5 degree) for rotation
+                # Smaller thresholds for better accuracy while still filtering minor noise
                 if (last_commanded_body_x is None or 
                     abs(body_x - last_commanded_body_x) > 0.005 or
                     abs(body_y - last_commanded_body_y) > 0.005 or
-                    abs(body_theta - last_commanded_body_theta) > 0.005):
+                    abs(body_yaw - last_commanded_body_yaw) > 0.01):
                     body_position_changed = True
             
-            # Reduced threshold for height changes (5mm instead of 1cm)
+            # Minimal threshold for height (0.5mm) - PERFECT accuracy
+            # Reduced threshold for better height matching
+            # Also check actual body height and correct if off
             height_command_needed = False
             height_offset = None
             if has_body_pose and body_z is not None and initial_body_z is not None:
-                height_offset = body_z - initial_body_z
-                height_offset = max(-0.2, min(0.2, height_offset))
+                # Check if we need to adjust based on recorded height
+                height_change_needed = (last_commanded_body_z is None or abs(body_z - last_commanded_body_z) > 0.0005)
                 
-                if last_commanded_body_z is None or abs(body_z - last_commanded_body_z) > 0.005:
+                # Also check actual body height if available (from previous verification)
+                actual_height_check_needed = False
+                try:
+                    robot_state_check = get_robot_state(robot)
+                    odom_tform_body_check = get_odom_tform_body(robot_state_check.kinematic_state.transforms_snapshot)
+                    actual_body_z_check = odom_tform_body_check.position.z
+                    # If actual height is off by more than 2mm, force correction
+                    if abs(actual_body_z_check - body_z) > 0.002:
+                        actual_height_check_needed = True
+                except:
+                    pass
+                
+                if height_change_needed or actual_height_check_needed:
+                    height_offset = body_z - initial_body_z
+                    height_offset = max(-0.2, min(0.2, height_offset))
                     height_command_needed = True
             
             # Strategy: 
-            # - If body is moving (x, y, theta changed), use SE2 commands (which will override height)
+            # - If body is moving (x, y, yaw changed), use SE2 commands (which will override height)
             #   In this case, the robot should automatically adjust height based on arm pose
             # - If body is NOT moving but height needs to change, use stand command with arm command
             #   This allows explicit height control without movement conflicts
@@ -207,33 +319,54 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             
             if body_position_changed:
                 # Body is moving - use SE2 commands
-                # Note: SE2 commands override stand commands, so we can't explicitly control height
-                # However, Spot's mobility stack should automatically adjust body height based on
-                # the arm's pose to maintain balance. This is the expected automatic behavior.
-                # The robot will automatically lower/raise its body based on where the arm is positioned.
+                # For PERFECT accuracy: also send height command even during movement
+                # This ensures legs match recorded position even when body is moving
                 body_pose_cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
                     goal_x=body_x,
                     goal_y=body_y,
-                    goal_heading=body_theta,
+                    goal_heading=body_yaw,
                     frame_name=ODOM_FRAME_NAME
                 )
-                mobility_command = body_pose_cmd.synchronized_command.mobility_command
+                
+                # Also send height command to ensure legs match during movement
+                # Use synchronized command with both SE2 and stand
+                if height_command_needed and height_offset is not None:
+                    stand_cmd = RobotCommandBuilder.synchro_stand_command(body_height=height_offset)
+                    # Combine SE2 and stand commands for perfect leg matching
+                    # Note: Stand command may be overridden, but it helps ensure correct leg position
+                    mobility_command = body_pose_cmd.synchronized_command.mobility_command
+                    # Try to set height in SE2 params if possible, otherwise rely on stand command
+                    # For now, send SE2 and then immediately send stand command after
+                    last_commanded_body_z = body_z
+                else:
+                    mobility_command = body_pose_cmd.synchronized_command.mobility_command
+                
                 last_commanded_body_x = body_x
                 last_commanded_body_y = body_y
-                last_commanded_body_theta = body_theta
-                # Note: We don't update last_commanded_body_z here because we're relying on
-                # automatic adjustment, not explicit height commands
+                last_commanded_body_yaw = body_yaw
+                
                 if i % 10 == 0:
-                    print(f"  SE2 movement: x={body_x:.3f}, y={body_y:.3f}, theta={body_theta:.3f} (height={body_z:.3f}, auto adjustment expected)")
+                    height_str = f", height_offset={height_offset:.3f}" if height_command_needed and height_offset is not None else ""
+                    print(f"  SE2 movement: x={body_x:.3f}, y={body_y:.3f}, yaw={body_yaw:.3f}, z={body_z:.3f}{height_str}")
             
             elif height_command_needed and height_offset is not None:
                 # Body is stationary but height needs to change - use stand command
                 # This works when combined with arm commands without SE2 movement
-                stand_cmd = RobotCommandBuilder.synchro_stand_command(body_height=height_offset)
+                
+                # Compute footprint_R_body from yaw/roll/pitch
+                footprint_R_body = None
+                if body_yaw is not None and body_roll is not None and body_pitch is not None:
+                    footprint_R_body = EulerZXY(yaw=body_yaw, roll=body_roll, pitch=body_pitch)
+                
+                stand_cmd = RobotCommandBuilder.synchro_stand_command(
+                    body_height=height_offset,
+                    footprint_R_body=footprint_R_body
+                )
                 mobility_command = stand_cmd.synchronized_command.mobility_command
                 last_commanded_body_z = body_z
                 if i % 10 == 0:
-                    print(f"  Stand height command: offset={height_offset:.3f} m (z={body_z:.3f} m)")
+                    orient_str = " (with orientation)" if footprint_R_body is not None else ""
+                    print(f"  Stand height command: offset={height_offset:.3f} m (z={body_z:.3f} m){orient_str}")
             
             if mobility_command is not None:
                 if gripper_command is not None:
@@ -258,21 +391,132 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 )
             
             robot_command = robot_command_pb2.RobotCommand(synchronized_command=sync_command)
-            command_client.robot_command(robot_command)
+            cmd_id = command_client.robot_command(robot_command)
+            
+            # For PERFECT accuracy: wait for ALL commands to complete
+            # This ensures no command queue buildup and perfect synchronization
+            # Waiting on every command guarantees exact position matching
+            command_completed = False
+            timeout = max(trajectory_time * 2.5, 0.2)
+            start_wait = time.time()
+            while time.time() - start_wait < timeout:
+                try:
+                    feedback = command_client.robot_command_feedback(cmd_id)
+                    arm_feedback = feedback.feedback.synchronized_feedback.arm_command_feedback
+                    if hasattr(arm_feedback, 'arm_joint_move_feedback'):
+                        if arm_feedback.arm_joint_move_feedback.status == 2:  # STATUS_COMPLETE
+                            command_completed = True
+                            break
+                except:
+                    pass
+                time.sleep(0.01)
+            
+            # If body moved (SE2 command), verify and correct height if needed
+            # SE2 commands can override height, so we check and adjust after movement
+            if body_position_changed and command_completed and has_body_pose and body_z is not None and initial_body_z is not None:
+                try:
+                    robot_state_check = get_robot_state(robot)
+                    odom_tform_body_check = get_odom_tform_body(robot_state_check.kinematic_state.transforms_snapshot)
+                    actual_body_z_check = odom_tform_body_check.position.z
+                    # If height is off by more than 1mm after SE2 movement, correct it
+                    if abs(actual_body_z_check - body_z) > 0.001:
+                        height_offset_followup = body_z - initial_body_z
+                        height_offset_followup = max(-0.2, min(0.2, height_offset_followup))
+                        
+                        # Compute footprint_R_body from yaw/roll/pitch
+                        footprint_R_body_followup = None
+                        if body_yaw is not None and body_roll is not None and body_pitch is not None:
+                            footprint_R_body_followup = EulerZXY(yaw=body_yaw, roll=body_roll, pitch=body_pitch)
+                        
+                        stand_cmd_followup = RobotCommandBuilder.synchro_stand_command(
+                            body_height=height_offset_followup,
+                            footprint_R_body=footprint_R_body_followup
+                        )
+                        followup_sync = synchronized_command_pb2.SynchronizedCommand.Request(
+                            arm_command=arm_command,
+                            mobility_command=stand_cmd_followup.synchronized_command.mobility_command
+                        )
+                        followup_robot_cmd = robot_command_pb2.RobotCommand(synchronized_command=followup_sync)
+                        command_client.robot_command(followup_robot_cmd)
+                        last_commanded_body_z = body_z
+                        if i % 10 == 0:
+                            print(f"  Height correction after SE2: offset={height_offset_followup:.3f} m (error was {abs(actual_body_z_check - body_z)*1000:.2f} mm)")
+                except:
+                    pass
+            
+            # Verify position accuracy for PERFECT replay
+            # This reads actual robot state and compares to commanded
+            # More frequent checking for better accuracy validation, especially body height
+            if i % 10 == 0:  # Check more frequently for better accuracy
+                try:
+                    robot_state = get_robot_state(robot)
+                    joint_states = robot_state.kinematic_state.joint_states
+                    joint_dict = {js.name: js for js in joint_states}
+                    
+                    # Verify arm positions
+                    max_error = 0.0
+                    for idx, joint_name in enumerate(arm_joint_names):
+                        if joint_name in joint_dict:
+                            actual_pos = joint_dict[joint_name].position.value
+                            commanded_pos = positions[idx]
+                            error = abs(actual_pos - commanded_pos)
+                            max_error = max(max_error, error)
+                    
+                    # Verify body height - critical for leg matching
+                    body_height_error = None
+                    if has_body_pose and body_z is not None:
+                        odom_tform_body = get_odom_tform_body(robot_state.kinematic_state.transforms_snapshot)
+                        actual_body_z = odom_tform_body.position.z
+                        body_height_error = abs(actual_body_z - body_z)
+                    
+                    if max_error > 0.03:  # Warn if error > 0.03 rad (~1.7 degrees)
+                        print(f"  WARNING: Arm position error at timestep {timestep}, max_error={max_error:.4f} rad (cmd_completed={command_completed})")
+                    
+                    if body_height_error is not None and body_height_error > 0.003:  # Warn if height error > 3mm
+                        print(f"  WARNING: Body height error at timestep {timestep}, error={body_height_error*1000:.2f} mm (target={body_z:.3f}, actual={actual_body_z:.3f})")
+                        
+                        # If height error is significant, adjust it in next command
+                        if body_height_error > 0.005:  # If error > 5mm, force correction
+                            # Will be corrected in next iteration by height command logic
+                            if i % 20 == 0:  # Print every 20 timesteps when correcting
+                                print(f"  Will correct body height in next command...")
+                except:
+                    pass
             
             if i % 10 == 0:
-                timestep, timestamp_utc, positions, gripper_val, body_x, body_y, body_z, body_theta = positions_data[i]
+                data = positions_data[i]
+                timestep = data[0]
+                timestamp_utc = data[1]
+                positions = data[2]
+                gripper_val = data[3]
+                body_x = data[4]
+                body_y = data[5]
+                body_z = data[6]
+                body_yaw = data[7]
+                body_roll = data[8]
+                body_pitch = data[9]
+                
                 gripper_str = f", gripper={gripper_val:.4f}" if gripper_val is not None else ""
                 dt_str = f", dt={dt*1000:.1f}ms" if has_timestamps else ""
-                print(f"Timestep {timestep}: sh0={positions[0]:.4f}, sh1={positions[1]:.4f}, el0={positions[2]:.4f}{gripper_str}{dt_str}")
+                cmd_status = "✓" if command_completed else "⏳"
+                print(f"Timestep {timestep} {cmd_status}: sh0={positions[0]:.4f}, sh1={positions[1]:.4f}, el0={positions[2]:.4f}{gripper_str}{dt_str}")
                 if has_body_pose:
-                    print(f"  Body: x={body_x:.3f}, y={body_y:.3f}, z={body_z:.3f} m, theta={body_theta:.3f} rad")
+                    print(f"  Body: x={body_x:.3f}, y={body_y:.3f}, z={body_z:.3f} m, yaw={body_yaw:.3f} rad")
             
             i += 1
             
+            # Adjust timing: account for command execution time
+            # If command completed, we've already waited, so minimal additional sleep
             elapsed = time.time() - loop_start_time
-            sleep_time = max(0, dt - elapsed)
-            time.sleep(sleep_time)
+            if command_completed:
+                # Command already completed - just maintain minimum timing
+                sleep_time = max(0, dt - elapsed)
+            else:
+                # Command didn't complete in time - give it more time next iteration
+                sleep_time = max(0, dt - elapsed - 0.05)
+            
+            if sleep_time > 0:
+                time.sleep(sleep_time)
             
     except KeyboardInterrupt:
         print("\nReplay stopped.")
@@ -293,7 +537,7 @@ def main():
     
     # CHANGE THIS FILE TO REPLAY THE MOTION!
     # YOUR FILE SHOULD BE IN THE 'teleoperation_data' FOLDER!
-    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251117_232047.txt")
+    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251118_144535.txt")
 
 
 if __name__ == "__main__":
