@@ -46,13 +46,21 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             joint_positions = [float(p.strip()) for p in parts[joint_start_idx:joint_start_idx+6]]
             gripper_value = float(parts[joint_start_idx+6].strip()) if len(parts) > joint_start_idx+6 else None
             
-            # Format: body_x, body_y, body_z, body_yaw, body_roll, body_pitch
+            # Format: body_x, body_y, body_z, body_yaw, body_pitch (roll not stored, always 0.0)
+            # Backward compatibility: check if old format has roll column
             body_x = float(parts[joint_start_idx+7].strip()) if len(parts) > joint_start_idx+7 else None
             body_y = float(parts[joint_start_idx+8].strip()) if len(parts) > joint_start_idx+8 else None
             body_z = float(parts[joint_start_idx+9].strip()) if len(parts) > joint_start_idx+9 else None
             body_yaw = float(parts[joint_start_idx+10].strip()) if len(parts) > joint_start_idx+10 else None
-            body_roll = float(parts[joint_start_idx+11].strip()) if len(parts) > joint_start_idx+11 else None
-            body_pitch = float(parts[joint_start_idx+12].strip()) if len(parts) > joint_start_idx+12 else None
+            # Check if file has roll column (old format) or not (new format)
+            if len(parts) > joint_start_idx+12:
+                # Old format: has roll column
+                body_roll = float(parts[joint_start_idx+11].strip()) if parts[joint_start_idx+11].strip() else None
+                body_pitch = float(parts[joint_start_idx+12].strip()) if len(parts) > joint_start_idx+12 else None
+            else:
+                # New format: no roll column
+                body_roll = None
+                body_pitch = float(parts[joint_start_idx+11].strip()) if len(parts) > joint_start_idx+11 else None
             
             positions_data.append((timestep, timestamp_utc, joint_positions, gripper_value, body_x, body_y, body_z, body_yaw, body_roll, body_pitch))
     
@@ -69,8 +77,8 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
         start_body_roll = start_body[8]
         start_body_pitch = start_body[9]
         print(f"  Start body pose: x={start_body[4]:.3f}, y={start_body[5]:.3f}, z={start_body[6]:.3f} m, yaw={start_body_yaw:.3f} rad")
-        if start_body_roll is not None and start_body_pitch is not None:
-            print(f"    roll={start_body_roll:.3f} rad, pitch={start_body_pitch:.3f} rad")
+        if start_body_pitch is not None:
+            print(f"    roll=0.0 rad, pitch={start_body_pitch:.3f} rad")
     if has_timestamps:
         print(f"Using original collection timestamps for timing (ignoring --rate parameter)")
     else:
@@ -160,13 +168,13 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             # Only use roll and pitch in footprint_R_body, not yaw (yaw handled by SE2)
             # footprint_R_body yaw should be 0 (body aligned with footprint)
             footprint_R_body = None
-            if start_body_roll is not None and start_body_pitch is not None:
-                footprint_R_body = EulerZXY(yaw=0.0, roll=start_body_roll, pitch=start_body_pitch)
+            if start_body_pitch is not None:
+                footprint_R_body = EulerZXY(yaw=0.0, roll=0.0, pitch=start_body_pitch)
             
             if abs(height_offset) > 0.001 or footprint_R_body is not None:
                 print(f"Adjusting body height: offset={height_offset:.3f} m")
                 if footprint_R_body is not None:
-                    print(f"  Setting body orientation: roll={start_body_roll:.3f} rad, pitch={start_body_pitch:.3f} rad")
+                    print(f"  Setting body orientation: roll=0.0 rad, pitch={start_body_pitch:.3f} rad")
                 stand_cmd = RobotCommandBuilder.synchro_stand_command(
                     body_height=height_offset,
                     footprint_R_body=footprint_R_body
@@ -375,8 +383,8 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 # Only use roll and pitch in footprint_R_body, not yaw (yaw handled by SE2 if body moves)
                 # footprint_R_body yaw should be 0 (body aligned with footprint)
                 footprint_R_body = None
-                if body_roll is not None and body_pitch is not None:
-                    footprint_R_body = EulerZXY(yaw=0.0, roll=body_roll, pitch=body_pitch)
+                if body_pitch is not None:
+                    footprint_R_body = EulerZXY(yaw=0.0, roll=0.0, pitch=body_pitch)
                 
                 stand_cmd = RobotCommandBuilder.synchro_stand_command(
                     body_height=height_offset,
@@ -446,8 +454,8 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                         # Only use roll and pitch in footprint_R_body, not yaw (yaw handled by SE2)
                         # footprint_R_body yaw should be 0 (body aligned with footprint)
                         footprint_R_body_followup = None
-                        if body_roll is not None and body_pitch is not None:
-                            footprint_R_body_followup = EulerZXY(yaw=0.0, roll=body_roll, pitch=body_pitch)
+                        if body_pitch is not None:
+                            footprint_R_body_followup = EulerZXY(yaw=0.0, roll=0.0, pitch=body_pitch)
                         
                         stand_cmd_followup = RobotCommandBuilder.synchro_stand_command(
                             body_height=height_offset_followup,
@@ -558,7 +566,7 @@ def main():
     
     # CHANGE THIS FILE TO REPLAY THE MOTION!
     # YOUR FILE SHOULD BE IN THE 'teleoperation_data' FOLDER!
-    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251118_181719.txt")
+    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251118_194055.txt")
 
 
 if __name__ == "__main__":

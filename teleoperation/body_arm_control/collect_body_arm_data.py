@@ -36,14 +36,14 @@ def collect_body_arm_data():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"teleoperation_data/body_arm_{timestamp}.txt"
     
-    print(f"Collecting arm joints + body pose (x, y, z, yaw, roll, pitch) at {rate_hz} Hz. Press Ctrl+C to stop.")
+    print(f"Collecting arm joints + body pose (x, y, z, yaw, pitch) at {rate_hz} Hz. Press Ctrl+C to stop.")
     print(f"Saving data to: {filename}\n")
     
     with open(filename, "w") as f:
         f.write(f"# Arm joint positions + body pose collected at {rate_hz} Hz\n")
         f.write(f"# Timestamp: {timestamp}\n")
-        f.write(f"# Format: timestep, timestamp_utc, {', '.join(arm_joint_names)}, gripper_open_percentage, body_x, body_y, body_z, body_yaw, body_roll, body_pitch\n")
-        f.write(f"# Body pose: x, y, z in odom frame (meters), yaw/roll/pitch (EulerZXY) in radians for SE2 and footprint_R_body\n\n")
+        f.write(f"# Format: timestep, timestamp_utc, {', '.join(arm_joint_names)}, gripper_open_percentage, body_x, body_y, body_z, body_yaw, body_pitch\n")
+        f.write(f"# Body pose: x, y, z in odom frame (meters), yaw/pitch (EulerZXY) in radians for SE2 and footprint_R_body (roll always 0.0)\n\n")
         
         try:
             timestep = 0
@@ -57,7 +57,6 @@ def collect_body_arm_data():
                 body_y_samples = []
                 body_z_samples = []
                 body_yaw_samples = []
-                body_roll_samples = []
                 body_pitch_samples = []
                 
                 for sample_idx in range(samples_per_timestep):
@@ -88,13 +87,11 @@ def collect_body_arm_data():
                     body_y_samples.append(body_pos.y)
                     body_z_samples.append(body_pos.z)
                     
-                    # Extract EulerZXY (yaw, roll, pitch) from quaternion
+                    # Extract EulerZXY (yaw, pitch) from quaternion (roll not collected, always 0.0)
                     w, x, y, z = body_rot.w, body_rot.x, body_rot.y, body_rot.z
                     yaw = np.arctan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
-                    roll = np.arctan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
                     pitch = np.arcsin(2*(w*y - z*x))
                     body_yaw_samples.append(yaw)
-                    body_roll_samples.append(roll)
                     body_pitch_samples.append(pitch)
                     
                     # Small delay between samples
@@ -115,7 +112,6 @@ def collect_body_arm_data():
                 body_y = sum(body_y_samples) / len(body_y_samples) if body_y_samples else 0.0
                 body_z = sum(body_z_samples) / len(body_z_samples) if body_z_samples else 0.0
                 body_yaw = sum(body_yaw_samples) / len(body_yaw_samples) if body_yaw_samples else 0.0
-                body_roll = sum(body_roll_samples) / len(body_roll_samples) if body_roll_samples else 0.0
                 body_pitch = sum(body_pitch_samples) / len(body_pitch_samples) if body_pitch_samples else 0.0
                 
                 print(f"[Timestep {timestep}]")
@@ -129,7 +125,7 @@ def collect_body_arm_data():
                 print()
                 
                 timestamp_utc = time.time()
-                f.write(f"{timestep}, {timestamp_utc}, {', '.join(f'{p:.9f}' for p in positions)}, {gripper_normalized:.9f}, {body_x:.9f}, {body_y:.9f}, {body_z:.9f}, {body_yaw:.9f}, {body_roll:.9f}, {body_pitch:.9f}\n")
+                f.write(f"{timestep}, {timestamp_utc}, {', '.join(f'{p:.9f}' for p in positions)}, {gripper_normalized:.9f}, {body_x:.9f}, {body_y:.9f}, {body_z:.9f}, {body_yaw:.9f}, {body_pitch:.9f}\n")
                 f.flush()
                 
                 timestep += 1
