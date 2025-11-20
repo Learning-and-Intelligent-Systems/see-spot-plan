@@ -45,7 +45,8 @@ def collect_body_arm_data():
         f.write(f"# Timestamp: {timestamp}\n")
         f.write(f"# Format: timestep, timestamp_utc, {', '.join(arm_joint_names)}, gripper_open_percentage, body_x, body_y, body_z, body_yaw, body_pitch, v_x, v_y, v_rot\n")
         f.write(f"# Body pose: x, y, z in odom frame (meters), yaw/pitch (EulerZXY) in radians for SE2 and footprint_R_body (roll always 0.0)\n")
-        f.write(f"# Velocity: v_x, v_y (linear velocity in odom frame, m/s), v_rot (angular velocity around z-axis, rad/s)\n\n")
+        f.write(f"# Velocity: v_x, v_y (linear velocity in BODY frame, m/s), v_rot (angular velocity around z-axis, rad/s)\n")
+        f.write(f"# NOTE: Velocities are transformed to body frame during collection for direct use in replay\n\n")
         
         try:
             timestep = 0
@@ -145,9 +146,24 @@ def collect_body_arm_data():
                             print(f"  Warning: Could not access velocity_of_body_in_odom directly: {e}")
                             print(f"  Will compute velocity from position differences if needed")
                     
-                    # Store velocity samples (will be 0.0 if not available, computed later if needed)
-                    v_x_samples.append(v_x)
-                    v_y_samples.append(v_y)
+                    # Transform velocity from odom to body frame during collection
+                    # This way we store body frame velocities directly, eliminating transformation during replay
+                    if v_x != 0.0 or v_y != 0.0:
+                        # Get current body yaw for transformation
+                        body_yaw_current = body_yaw_samples[-1] if body_yaw_samples else 0.0
+                        cos_yaw = np.cos(body_yaw_current)
+                        sin_yaw = np.sin(body_yaw_current)
+                        
+                        # Transform: v_body = R(-yaw) * v_odom
+                        v_x_body = v_x * cos_yaw + v_y * sin_yaw
+                        v_y_body = -v_x * sin_yaw + v_y * cos_yaw
+                    else:
+                        v_x_body = 0.0
+                        v_y_body = 0.0
+                    
+                    # Store body frame velocity samples
+                    v_x_samples.append(v_x_body)
+                    v_y_samples.append(v_y_body)
                     v_rot_samples.append(v_rot)
                     
                     # Small delay between samples
@@ -176,11 +192,16 @@ def collect_body_arm_data():
                 # Fallback: If velocity is zero or not available, compute from position differences
                 velocity_available = any(abs(v) > 1e-6 for v in v_x_samples + v_y_samples + v_rot_samples)
                 if not velocity_available and prev_body_x is not None and prev_timestamp is not None:
-                    # Compute velocity from position differences
+                    # Compute velocity from position differences (in odom frame)
                     dt_vel = current_timestamp - prev_timestamp
                     if dt_vel > 1e-6:  # Avoid division by zero
-                        v_x = (body_x - prev_body_x) / dt_vel
-                        v_y = (body_y - prev_body_y) / dt_vel
+                        v_x_odom = (body_x - prev_body_x) / dt_vel
+                        v_y_odom = (body_y - prev_body_y) / dt_vel
+                        # Transform to body frame
+                        cos_yaw = np.cos(body_yaw)
+                        sin_yaw = np.sin(body_yaw)
+                        v_x = v_x_odom * cos_yaw + v_y_odom * sin_yaw
+                        v_y = -v_x_odom * sin_yaw + v_y_odom * cos_yaw
                         # Handle yaw wrapping for angular velocity
                         yaw_diff = body_yaw - prev_body_yaw
                         # Normalize to [-pi, pi]
@@ -191,7 +212,7 @@ def collect_body_arm_data():
                         v_rot = yaw_diff / dt_vel
                     if timestep == 1:
                         print("  Note: Computing velocity from position differences (direct velocity not available)")
-                        print(f"  Computed: v_x={v_x:.6f} m/s, v_y={v_y:.6f} m/s from position change")
+                        print(f"  Computed: v_x={v_x:.6f} m/s, v_y={v_y:.6f} m/s in body frame from position change")
                 elif not velocity_available and timestep == 1:
                     print("  WARNING: No velocity data available and cannot compute from position (first timestep)")
                 

@@ -53,13 +53,15 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             body_z = float(parts[joint_start_idx+9].strip()) if len(parts) > joint_start_idx+9 else None
             body_yaw = float(parts[joint_start_idx+10].strip()) if len(parts) > joint_start_idx+10 else None
             # Check if file has roll column (old format) or not (new format)
-            if len(parts) > joint_start_idx+12:
-                # Old format: has roll column
+            # New format: timestep, timestamp, 6 joints, gripper, body_x, body_y, body_z, body_yaw, body_pitch, v_x, v_y, v_rot = 17 columns
+            # Old format: same but with body_roll between body_yaw and body_pitch = 18 columns
+            if len(parts) >= 18:
+                # Old format: has roll column (18+ columns)
                 body_roll = float(parts[joint_start_idx+11].strip()) if parts[joint_start_idx+11].strip() else None
                 body_pitch = float(parts[joint_start_idx+12].strip()) if len(parts) > joint_start_idx+12 else None
                 velocity_start_idx = joint_start_idx+13
             else:
-                # New format: no roll column
+                # New format: no roll column (17 columns)
                 body_roll = None
                 body_pitch = float(parts[joint_start_idx+11].strip()) if len(parts) > joint_start_idx+11 else None
                 velocity_start_idx = joint_start_idx+12
@@ -231,12 +233,17 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             loop_start_time = time.time()
             
             # Calculate actual dt from timestamps if available
+            # This preserves the original collection timing
             if has_timestamps and i > 0:
                 prev_timestamp = positions_data[i - 1][1]
                 curr_timestamp = positions_data[i][1]
                 if prev_timestamp is not None and curr_timestamp is not None:
                     dt = curr_timestamp - prev_timestamp
-                    dt = max(0.005, min(0.1, dt))
+                    # Don't clamp dt too aggressively - preserve original timing
+                    dt = max(0.001, min(0.2, dt))
+            else:
+                # No timestamps - use default rate
+                dt = 1.0 / rate_hz
             
             trajectory_points = []
             
@@ -356,65 +363,61 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             mobility_command = None
             
             # Use velocity commands if velocity data is available (only x and y, no rotation)
+            # NOTE: Velocities are now collected in body frame, so no transformation needed!
             if has_velocity_data and (v_x_odom is not None or v_y_odom is not None):
-                v_x_odom_val = v_x_odom if v_x_odom is not None else 0.0
-                v_y_odom_val = v_y_odom if v_y_odom is not None else 0.0
+                # v_x_odom and v_y_odom are actually body frame velocities now (misnamed variable)
+                v_x_body_val = v_x_odom if v_x_odom is not None else 0.0
+                v_y_body_val = v_y_odom if v_y_odom is not None else 0.0
                 
-                # Smooth odom velocities directly first
+                # Smooth body frame velocities
                 alpha = 0.3
-                smoothed_v_x_odom = alpha * v_x_odom_val + (1 - alpha) * smoothed_v_x_odom if i > 0 else v_x_odom_val
-                smoothed_v_y_odom = alpha * v_y_odom_val + (1 - alpha) * smoothed_v_y_odom if i > 0 else v_y_odom_val
+                smoothed_v_x_body = alpha * v_x_body_val + (1 - alpha) * smoothed_v_x_body if i > 0 else v_x_body_val
+                smoothed_v_y_body = alpha * v_y_body_val + (1 - alpha) * smoothed_v_y_body if i > 0 else v_y_body_val
                 
-                # Transform from odom to body frame - this is CRITICAL
-                # The robot's body frame is rotated by its yaw relative to odom
-                try:
-                    robot_state_vel = get_robot_state(robot)
-                    odom_tform_body = get_odom_tform_body(robot_state_vel.kinematic_state.transforms_snapshot)
-                    current_body_yaw = odom_tform_body.rotation.to_yaw()
-                    
-                    # To transform velocity from odom to body: rotate by -yaw
-                    # Standard rotation: [x'; y'] = [cos(θ) -sin(θ); sin(θ) cos(θ)] * [x; y]
-                    # For rotation by -yaw: use cos(-yaw) = cos(yaw), sin(-yaw) = -sin(yaw)
-                    cos_yaw = np.cos(current_body_yaw)
-                    sin_yaw = np.sin(current_body_yaw)
-                    
-                    # v_body = R(-yaw) * v_odom
-                    # R(-yaw) = [cos(yaw) sin(yaw); -sin(yaw) cos(yaw)]
-                    v_x_body = smoothed_v_x_odom * cos_yaw + smoothed_v_y_odom * sin_yaw
-                    v_y_body = -smoothed_v_x_odom * sin_yaw + smoothed_v_y_odom * cos_yaw
-                except Exception as e:
-                    if i % 10 == 0:
-                        print(f"  Warning: Velocity transform failed: {e}, using odom frame directly")
-                    v_x_body = smoothed_v_x_odom
-                    v_y_body = smoothed_v_y_odom
+                # No transformation needed - already in body frame!
+                v_x_body = smoothed_v_x_body
+                v_y_body = smoothed_v_y_body
                 
                 velocity_magnitude = np.sqrt(v_x_body**2 + v_y_body**2)
                 
                 velocity_threshold = 1e-6  # Very low threshold to catch any motion
                 
+                # Always send velocity commands - Spot requires continuous commands
+                # The expiration time logic will ensure commands last for the full duration
                 if velocity_magnitude > velocity_threshold:
                     max_velocity = 1.5
                     final_v_x = max(-max_velocity, min(max_velocity, v_x_body))
                     final_v_y = max(-max_velocity, min(max_velocity, v_y_body))
                     final_v_rot = 0.0
                     
-                    # Spot velocity command expects body frame
-                    # Use odom velocities directly - no swap, no transformation
+                    # Use synchro_velocity_command - requires body frame velocities
+                    # Velocities are already in body frame from collection
+                    # v_x_body = forward/backward, v_y_body = left/right
                     velocity_cmd = RobotCommandBuilder.synchro_velocity_command(
-                        v_x=final_v_x,  # odom v_x -> body v_x (forward/back)
-                        v_y=final_v_y,  # odom v_y -> body v_y (left/right)
+                        v_x=final_v_x,  # v_x_body -> v_x (forward/back)
+                        v_y=final_v_y,  # v_y_body -> v_y (left/right)
                         v_rot=final_v_rot
                     )
                     mobility_command = velocity_cmd.synchronized_command.mobility_command
                     
                     if i % 10 == 0:
-                        print(f"  Velocity command: cmd_v_x={final_v_y:.4f} (forward/back), cmd_v_y={final_v_x:.4f} (left/right)")
-                        print(f"    Raw odom: v_x={v_x_odom_val:.4f}, v_y={v_y_odom_val:.4f}")
-                        print(f"    Body frame: v_x_body={v_x_body:.4f}, v_y_body={v_y_body:.4f}")
+                        print(f"  Velocity command: cmd_v_x={final_v_x:.4f} (forward/back), cmd_v_y={final_v_y:.4f} (left/right)")
+                        print(f"    Body frame (from file): v_x={v_x_body_val:.4f}, v_y={v_y_body_val:.4f}")
+                        print(f"    Smoothed body frame: v_x_body={v_x_body:.4f}, v_y_body={v_y_body:.4f}")
                         print(f"    Final (clamped): final_v_x={final_v_x:.4f}, final_v_y={final_v_y:.4f}")
                 else:
+                    # Velocity is zero, send zero command to stop
+                    final_v_x = 0.0
+                    final_v_y = 0.0
+                    final_v_rot = 0.0
+                    velocity_cmd = RobotCommandBuilder.synchro_velocity_command(
+                        v_x=final_v_x,
+                        v_y=final_v_y,
+                        v_rot=final_v_rot
+                    )
+                    mobility_command = velocity_cmd.synchronized_command.mobility_command
                     if i % 10 == 0:
-                        print(f"  Velocity too small ({velocity_magnitude:.6f} m/s), skipping command")
+                        print(f"  Velocity zero, sending stop command")
             
             elif height_command_needed and height_offset is not None:
                 # Body is stationary but height needs to change - use stand command
@@ -462,13 +465,23 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             
             # Velocity commands need an expiration time (end_time_secs)
             # The robot will either walk (velocity) OR move arm, not both simultaneously
-            # Set expiration to last through the loop period so commands are sent continuously
+            # Send commands continuously matching the original data collection timing
             is_velocity_command = (mobility_command is not None and has_velocity_data)
             if is_velocity_command:
                 loop_period = dt if has_timestamps else (1.0 / rate_hz)
-                end_time_secs = time.time() + loop_period * 2.0  # Expire after next command is sent
+                
+                # Set expiration to ensure command persists until next command is sent
+                # Use the actual dt from timestamps to match original collection rate
+                # Add small buffer to ensure no gaps between commands
+                expiration_duration = loop_period * 2.0 + 0.05  # Cover next 2 timesteps + 50ms buffer
+                expiration_duration = max(0.1, min(expiration_duration, 1.0))  # Clamp for safety
+                
+                end_time_secs = time.time() + expiration_duration
                 cmd_id = command_client.robot_command(robot_command, end_time_secs=end_time_secs)
                 command_completed = False
+                
+                if i % 50 == 0:
+                    print(f"  Velocity command: v_x={final_v_x:.4f}, v_y={final_v_y:.4f}, dt={loop_period:.3f}s, expiration={expiration_duration:.3f}s")
             else:
                 cmd_id = command_client.robot_command(robot_command)
                 command_completed = False
@@ -581,18 +594,17 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             
             i += 1
             
-            # Adjust timing: account for command execution time
-            # If command completed, we've already waited, so minimal additional sleep
+            # Preserve original collection timing exactly
+            # This ensures the trajectory duration matches the original data collection
             elapsed = time.time() - loop_start_time
-            if command_completed:
-                # Command already completed - just maintain minimum timing
-                sleep_time = max(0, dt - elapsed)
-            else:
-                # Command didn't complete in time - give it more time next iteration
-                sleep_time = max(0, dt - elapsed - 0.05)
+            sleep_time = dt - elapsed
             
+            # Always sleep to match original timing exactly
+            # This is critical - we must wait the exact dt from the original collection
             if sleep_time > 0:
                 time.sleep(sleep_time)
+            # If elapsed >= dt, we're already behind schedule, so don't sleep
+            # This ensures we match the original timing as closely as possible
             
     except KeyboardInterrupt:
         print("\nReplay stopped.")
@@ -613,7 +625,7 @@ def main():
     
     # CHANGE THIS FILE TO REPLAY THE MOTION!
     # YOUR FILE SHOULD BE IN THE 'teleoperation_data' FOLDER!
-    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251120_070626.txt")
+    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251120_083836.txt")
 
 
 if __name__ == "__main__":
