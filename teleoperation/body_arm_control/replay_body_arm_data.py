@@ -1,4 +1,6 @@
 import argparse
+from calendar import c
+from math import e
 import os
 import time
 from datetime import datetime
@@ -57,16 +59,24 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 # Old format: has roll column
                 body_roll = float(parts[joint_start_idx+11].strip()) if parts[joint_start_idx+11].strip() else None
                 body_pitch = float(parts[joint_start_idx+12].strip()) if len(parts) > joint_start_idx+12 else None
+                velocity_start_idx = joint_start_idx+13
             else:
                 # New format: no roll column
                 body_roll = None
                 body_pitch = float(parts[joint_start_idx+11].strip()) if len(parts) > joint_start_idx+11 else None
+                velocity_start_idx = joint_start_idx+12
             
-            positions_data.append((timestep, timestamp_utc, joint_positions, gripper_value, body_x, body_y, body_z, body_yaw, body_roll, body_pitch))
+            v_x = float(parts[velocity_start_idx].strip()) if len(parts) > velocity_start_idx else None
+            v_y = float(parts[velocity_start_idx+1].strip()) if len(parts) > velocity_start_idx+1 else None
+            v_rot = float(parts[velocity_start_idx+2].strip()) if len(parts) > velocity_start_idx+2 else None
+            
+            positions_data.append((timestep, timestamp_utc, joint_positions, gripper_value, body_x, body_y, body_z, body_yaw, body_roll, body_pitch, v_x, v_y, v_rot))
     
     has_timestamps = positions_data[0][1] is not None
     has_gripper_data = positions_data[0][3] is not None
     has_body_pose = positions_data[0][4] is not None
+    has_velocity_data = positions_data[0][10] is not None
+
     print(f"Loaded {len(positions_data)} timesteps")
     print(f"Timestamps: {'Yes' if has_timestamps else 'No (using fixed rate)'}")
     print(f"Gripper data: {'Yes' if has_gripper_data else 'No'}")
@@ -203,13 +213,18 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
         last_commanded_body_z = initial_body_z
     
     print("Starting replay...\n")
-    
+
     # For maximum accuracy: use single-point trajectories (no interpolation)
     # This ensures exact position replay, critical for precise tasks like grasping
     actual_window_size = 1
-    
+
     dt = 1.0 / rate_hz
     last_gripper_value = start_gripper if start_gripper is not None else None
+
+    # Initialize smoothed velocity variables for exponential moving average
+    smoothed_v_x_body = 0.0
+    smoothed_v_y_body = 0.0
+    smoothed_v_rot_body = 0.0
     
     try:
         i = 0
@@ -284,8 +299,19 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             body_yaw = data[7]
             body_roll = data[8]
             body_pitch = data[9]
+            v_x_recorded = data[10]
+            v_y_recorded = data[11]
+            v_rot_recorded = data[12]
             gripper_command = None
             mobility_command = None
+
+            v_x_odom = 0.0
+            v_y_odom = 0.0
+            v_rot_odom = 0.0
+            if has_velocity_data and v_x_recorded is not None and v_y_recorded is not None and v_rot_recorded is not None:
+                v_x_odom = v_x_recorded
+                v_y_odom = v_y_recorded
+                v_rot_odom = v_rot_recorded
             
             # Always send gripper command for PERFECT accuracy - no threshold
             # This ensures perfect synchronization even for tiny changes
@@ -336,46 +362,45 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                     height_offset = max(-0.2, min(0.2, height_offset))
                     height_command_needed = True
             
-            # Strategy: 
-            # - If body is moving (x, y, yaw changed), use SE2 commands (which will override height)
-            #   In this case, the robot should automatically adjust height based on arm pose
-            # - If body is NOT moving but height needs to change, use stand command with arm command
-            #   This allows explicit height control without movement conflicts
-            
+
             mobility_command = None
-            
+
             if body_position_changed:
-                # Body is moving - use SE2 commands
-                # For PERFECT accuracy: also send height command even during movement
-                # This ensures legs match recorded position even when body is moving
-                body_pose_cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
-                    goal_x=body_x,
-                    goal_y=body_y,
-                    goal_heading=body_yaw,
-                    frame_name=ODOM_FRAME_NAME
+                # Velocity is already in odom frame from collection, use directly
+                # Apply smoothing to reduce noise
+                alpha = 0.3
+                smoothed_v_x_body = alpha * v_x_odom + (1 - alpha) * smoothed_v_x_body
+                smoothed_v_y_body = alpha * v_y_odom + (1 - alpha) * smoothed_v_y_body
+                smoothed_v_rot_body = alpha * v_rot_odom + (1 - alpha) * smoothed_v_rot_body
+
+                velocity_cmd = RobotCommandBuilder.synchro_velocity_command(
+                    v_x=smoothed_v_x_body,
+                    v_y=smoothed_v_y_body,
+                    r_rot=smoothed_v_rot_body
                 )
-                
-                # Also send height command to ensure legs match during movement
-                # Use synchronized command with both SE2 and stand
-                if height_command_needed and height_offset is not None:
-                    stand_cmd = RobotCommandBuilder.synchro_stand_command(body_height=height_offset)
-                    # Combine SE2 and stand commands for perfect leg matching
-                    # Note: Stand command may be overridden, but it helps ensure correct leg position
-                    mobility_command = body_pose_cmd.synchronized_command.mobility_command
-                    # Try to set height in SE2 params if possible, otherwise rely on stand command
-                    # For now, send SE2 and then immediately send stand command after
+                mobility_command = velocity_cmd.synchronized_command.mobility_command
+
+                # update last commanded position to prevent position change detection from triggering SE2
+                if has_body_pose and body_x is not None and body_y is not None and body_yaw is not None:
+                    last_commanded_body_x = body_x
+                    last_commanded_body_y = body_y
+                    last_commanded_body_yaw = body_yaw
                     last_commanded_body_z = body_z
-                else:
-                    mobility_command = body_pose_cmd.synchronized_command.mobility_command
-                
-                last_commanded_body_x = body_x
-                last_commanded_body_y = body_y
-                last_commanded_body_yaw = body_yaw
-                
-                if i % 10 == 0:
-                    height_str = f", height_offset={height_offset:.3f}" if height_command_needed and height_offset is not None else ""
-                    print(f"  SE2 movement: x={body_x:.3f}, y={body_y:.3f}, yaw={body_yaw:.3f}, z={body_z:.3f}{height_str}")
-            
+
+            elif has_velocity_data and (v_x_odom != 0.0 or v_y_odom != 0.0 or v_rot_odom != 0.0):
+                # Even if body position doesn't change, send velocity commands if robot is moving
+                alpha = 0.3
+                smoothed_v_x_body = alpha * v_x_odom + (1 - alpha) * smoothed_v_x_body
+                smoothed_v_y_body = alpha * v_y_odom + (1 - alpha) * smoothed_v_y_body
+                smoothed_v_rot_body = alpha * v_rot_odom + (1 - alpha) * smoothed_v_rot_body
+
+                velocity_cmd = RobotCommandBuilder.synchro_velocity_command(
+                    v_x=smoothed_v_x_body,
+                    v_y=smoothed_v_y_body,
+                    r_rot=smoothed_v_rot_body
+                )
+                mobility_command = velocity_cmd.synchronized_command.mobility_command
+
             elif height_command_needed and height_offset is not None:
                 # Body is stationary but height needs to change - use stand command
                 # This works when combined with arm commands without SE2 movement
