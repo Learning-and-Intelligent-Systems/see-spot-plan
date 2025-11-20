@@ -319,10 +319,6 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 gripper_command = gripper_cmd.synchronized_command.gripper_command
                 last_gripper_value = current_gripper
             
-            # Body position change detection with hysteresis for noise filtering
-            # Use meaningful thresholds to filter out small variations/noise in recorded data
-            # Only send SE2 commands when there's a significant position change
-            # Reduced thresholds for better accuracy while still filtering noise
             body_position_changed = False
             if has_body_pose and body_x is not None and body_y is not None and body_yaw is not None:
                 # Threshold: 5mm for position, 0.01 rad (~0.5 degree) for rotation
@@ -334,12 +330,12 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                     body_position_changed = True
             
             # Minimal threshold for height (0.5mm) - PERFECT accuracy
-            # Reduced threshold for better height matching
-            # Also check actual body height and correct if off
+            # This matches the original working code exactly
             height_command_needed = False
             height_offset = None
             if has_body_pose and body_z is not None and initial_body_z is not None:
                 # Check if we need to adjust based on recorded height
+                # Use the same threshold as the original working code
                 height_change_needed = (last_commanded_body_z is None or abs(body_z - last_commanded_body_z) > 0.0005)
                 
                 # Also check actual body height if available (from previous verification)
@@ -358,7 +354,10 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                     height_offset = body_z - initial_body_z
                     height_offset = max(-0.2, min(0.2, height_offset))
                     height_command_needed = True
-            
+                    
+                    if i % 10 == 0:
+                        last_cmd_str = f"{last_commanded_body_z:.6f}" if last_commanded_body_z is not None else "None"
+                        print(f"  DEBUG: Height adjustment needed: target_z={body_z:.6f}, last_commanded={last_cmd_str}, offset={height_offset:.6f}")
             
             mobility_command = None
             
@@ -380,10 +379,12 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 
                 velocity_magnitude = np.sqrt(v_x_body**2 + v_y_body**2)
                 
-                velocity_threshold = 1e-6  # Very low threshold to catch any motion
+                # Use a meaningful threshold - only send velocity commands when there's actual movement
+                # Very small velocities (< 0.01 m/s) are likely noise and should not block height commands
+                velocity_threshold = 0.01  # 1 cm/s - below this, treat as stationary (allow height commands)
                 
-                # Always send velocity commands - Spot requires continuous commands
-                # The expiration time logic will ensure commands last for the full duration
+                # Only send velocity commands when there's meaningful movement
+                # This allows height commands to work when body is stationary (arm moving)
                 if velocity_magnitude > velocity_threshold:
                     max_velocity = 1.5
                     final_v_x = max(-max_velocity, min(max_velocity, v_x_body))
@@ -406,25 +407,12 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                         print(f"    Smoothed body frame: v_x_body={v_x_body:.4f}, v_y_body={v_y_body:.4f}")
                         print(f"    Final (clamped): final_v_x={final_v_x:.4f}, final_v_y={final_v_y:.4f}")
                 else:
-                    # Velocity is zero, send zero command to stop
-                    final_v_x = 0.0
-                    final_v_y = 0.0
-                    final_v_rot = 0.0
-                    velocity_cmd = RobotCommandBuilder.synchro_velocity_command(
-                        v_x=final_v_x,
-                        v_y=final_v_y,
-                        v_rot=final_v_rot
-                    )
-                    mobility_command = velocity_cmd.synchronized_command.mobility_command
+                    # Velocity is zero - don't set mobility_command, let height command logic handle it
+                    mobility_command = None
                     if i % 10 == 0:
-                        print(f"  Velocity zero, sending stop command")
+                        print(f"  Velocity zero (v_x={v_x_body_val:.6f}, v_y={v_y_body_val:.6f}), will send stand command for height control")
             
-            elif height_command_needed and height_offset is not None:
-                # Body is stationary but height needs to change - use stand command
-                # This works when combined with arm commands without SE2 movement
-                
-                # Only use roll and pitch in footprint_R_body, not yaw (yaw handled by SE2 if body moves)
-                # footprint_R_body yaw should be 0 (body aligned with footprint)
+            if height_command_needed and height_offset is not None and mobility_command is None:
                 footprint_R_body = None
                 if body_pitch is not None:
                     footprint_R_body = EulerZXY(yaw=0.0, roll=0.0, pitch=body_pitch)
@@ -437,7 +425,10 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 last_commanded_body_z = body_z
                 if i % 10 == 0:
                     orient_str = " (with orientation)" if footprint_R_body is not None else ""
-                    print(f"  Stand height command: offset={height_offset:.3f} m (z={body_z:.3f} m){orient_str}")
+                    print(f"  ✓ Stand height command: offset={height_offset:.3f} m (z={body_z:.3f} m){orient_str}")
+            elif height_command_needed and i % 10 == 0:
+                # Debug: why didn't height command run?
+                print(f"  Height command needed but not sent: height_offset={height_offset}, mobility_command={'set' if mobility_command is not None else 'None'}")
             
             if mobility_command is not None:
                 if gripper_command is not None:
@@ -481,7 +472,8 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 command_completed = False
                 
                 if i % 50 == 0:
-                    print(f"  Velocity command: v_x={final_v_x:.4f}, v_y={final_v_y:.4f}, dt={loop_period:.3f}s, expiration={expiration_duration:.3f}s")
+                    # Use v_x_body and v_y_body which are always defined
+                    print(f"  Velocity command: v_x={v_x_body:.4f}, v_y={v_y_body:.4f}, dt={loop_period:.3f}s, expiration={expiration_duration:.3f}s")
             else:
                 cmd_id = command_client.robot_command(robot_command)
                 command_completed = False
@@ -533,10 +525,6 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 except:
                     pass
             
-            # Verify position accuracy for PERFECT replay
-            # This reads actual robot state and compares to commanded
-            # More frequent checking for better accuracy validation, especially body height
-            if i % 10 == 0:  # Check more frequently for better accuracy
                 try:
                     robot_state = get_robot_state(robot)
                     joint_states = robot_state.kinematic_state.joint_states
@@ -594,17 +582,11 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             
             i += 1
             
-            # Preserve original collection timing exactly
-            # This ensures the trajectory duration matches the original data collection
             elapsed = time.time() - loop_start_time
             sleep_time = dt - elapsed
             
-            # Always sleep to match original timing exactly
-            # This is critical - we must wait the exact dt from the original collection
             if sleep_time > 0:
                 time.sleep(sleep_time)
-            # If elapsed >= dt, we're already behind schedule, so don't sleep
-            # This ensures we match the original timing as closely as possible
             
     except KeyboardInterrupt:
         print("\nReplay stopped.")
@@ -623,8 +605,6 @@ def main():
     verify_estop(robot)
     robot.time_sync.wait_for_sync()
     
-    # CHANGE THIS FILE TO REPLAY THE MOTION!
-    # YOUR FILE SHOULD BE IN THE 'teleoperation_data' FOLDER!
     replay_body_arm_data(robot, "teleoperation_data/body_arm_20251120_083836.txt")
 
 
