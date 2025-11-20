@@ -66,11 +66,11 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 body_pitch = float(parts[joint_start_idx+11].strip()) if len(parts) > joint_start_idx+11 else None
                 velocity_start_idx = joint_start_idx+12
             
-            # Read velocity data (v_x, v_y in odom frame - no rotation for now)
-            v_x = float(parts[velocity_start_idx].strip()) if len(parts) > velocity_start_idx else None
-            v_y = float(parts[velocity_start_idx+1].strip()) if len(parts) > velocity_start_idx+1 else None
-            
-            positions_data.append((timestep, timestamp_utc, joint_positions, gripper_value, body_x, body_y, body_z, body_yaw, body_roll, body_pitch, v_x, v_y))
+            # Read velocity data (v_x_body, v_y_body in body frame - no rotation for now)
+            v_x_body = float(parts[velocity_start_idx].strip()) if len(parts) > velocity_start_idx else None
+            v_y_body = float(parts[velocity_start_idx+1].strip()) if len(parts) > velocity_start_idx+1 else None
+
+            positions_data.append((timestep, timestamp_utc, joint_positions, gripper_value, body_x, body_y, body_z, body_yaw, body_roll, body_pitch, v_x_body, v_y_body))
     
     has_timestamps = positions_data[0][1] is not None
     has_gripper_data = positions_data[0][3] is not None
@@ -305,8 +305,8 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             body_yaw = data[7]
             body_roll = data[8]
             body_pitch = data[9]
-            v_x_odom = data[10] if has_velocity_data and len(data) > 10 else None
-            v_y_odom = data[11] if has_velocity_data and len(data) > 11 else None
+            v_x_body = data[10] if has_velocity_data and len(data) > 10 else None
+            v_y_body = data[11] if has_velocity_data and len(data) > 11 else None
             gripper_command = None
             mobility_command = None
             
@@ -323,64 +323,81 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             if has_body_pose and body_x is not None and body_y is not None and body_yaw is not None:
                 # Threshold: 5mm for position, 0.01 rad (~0.5 degree) for rotation
                 # Smaller thresholds for better accuracy while still filtering minor noise
-                if (last_commanded_body_x is None or 
+                if (last_commanded_body_x is None or
                     abs(body_x - last_commanded_body_x) > 0.005 or
                     abs(body_y - last_commanded_body_y) > 0.005 or
                     abs(body_yaw - last_commanded_body_yaw) > 0.01):
                     body_position_changed = True
-            
-            # No runtime height control - only set initial height at start
-            # Let Spot's internal controller handle height during replay
+
+            # Determine mobility command independently:
+            # 1. Check for walking (velocity data available and magnitude > threshold)
+            # 2. Check for height adjustment (body pose data available and height offset != 0)
             mobility_command = None
             is_velocity_mobility = False  # Track whether mobility_command is a velocity command
-            
-            # Use velocity commands if velocity data is available (only x and y, no rotation)
-            # NOTE: Velocities are now collected in body frame, so no transformation needed!
-            if has_velocity_data and (v_x_odom is not None or v_y_odom is not None):
-                # v_x_odom and v_y_odom are actually body frame velocities now (misnamed variable)
-                v_x_body_val = v_x_odom if v_x_odom is not None else 0.0
-                v_y_body_val = v_y_odom if v_y_odom is not None else 0.0
-                
+            case_type = None  # Track what type of movement this is
+
+            # Calculate height offset for stand command
+            height_offset = None
+            if has_body_pose and body_z is not None and initial_body_z is not None:
+                height_offset = body_z - initial_body_z
+                height_offset = max(-0.1, min(0.1, height_offset))
+
+            # Check if we should send velocity commands (walking)
+            velocity_magnitude = 0.0
+            sending_velocity = False
+            if has_velocity_data and (v_x_body is not None or v_y_body is not None):
+                # v_x_body and v_y_body are in body frame (forward/back and left/right)
+                v_x_body_raw = v_x_body if v_x_body is not None else 0.0
+                v_y_body_raw = v_y_body if v_y_body is not None else 0.0
+
                 # Smooth body frame velocities
                 alpha = 0.3
-                smoothed_v_x_body = alpha * v_x_body_val + (1 - alpha) * smoothed_v_x_body if i > 0 else v_x_body_val
-                smoothed_v_y_body = alpha * v_y_body_val + (1 - alpha) * smoothed_v_y_body if i > 0 else v_y_body_val
-                
+                smoothed_v_x_body = alpha * v_x_body_raw + (1 - alpha) * smoothed_v_x_body if i > 0 else v_x_body_raw
+                smoothed_v_y_body = alpha * v_y_body_raw + (1 - alpha) * smoothed_v_y_body if i > 0 else v_y_body_raw
+
                 # No transformation needed - already in body frame!
-                v_x_body = smoothed_v_x_body
-                v_y_body = smoothed_v_y_body
-                
-                velocity_magnitude = np.sqrt(v_x_body**2 + v_y_body**2)
-                
-                # Use a meaningful threshold - only send velocity commands when there's actual movement
+                v_x_body_final = smoothed_v_x_body
+                v_y_body_final = smoothed_v_y_body
+
+                velocity_magnitude = np.sqrt(v_x_body_final**2 + v_y_body_final**2)
                 velocity_threshold = 0.01  # 1 cm/s - below this, treat as stationary
-                
-                # Only send velocity commands when there's meaningful movement
+
+                # Send velocity commands if magnitude is meaningful
                 if velocity_magnitude > velocity_threshold:
+                    sending_velocity = True
                     max_velocity = 1.5
-                    final_v_x = max(-max_velocity, min(max_velocity, v_x_body))
-                    final_v_y = max(-max_velocity, min(max_velocity, v_y_body))
+                    final_v_x = max(-max_velocity, min(max_velocity, v_x_body_final))
+                    final_v_y = max(-max_velocity, min(max_velocity, v_y_body_final))
                     final_v_rot = 0.0
-                    
-                    # Use synchro_velocity_command - requires body frame velocities
-                    # Velocities are already in body frame from collection
-                    # v_x_body = forward/backward, v_y_body = left/right
+
                     velocity_cmd = RobotCommandBuilder.synchro_velocity_command(
-                        v_x=final_v_x,  # v_x_body -> v_x (forward/back)
-                        v_y=final_v_y,  # v_y_body -> v_y (left/right)
+                        v_x=final_v_x,  # forward/back
+                        v_y=final_v_y,  # left/right
                         v_rot=final_v_rot
                     )
                     mobility_command = velocity_cmd.synchronized_command.mobility_command
-                    is_velocity_mobility = True  # Mark this as a velocity command
-                    
+                    is_velocity_mobility = True
+
                     if i % 10 == 0:
-                        print(f"  Velocity command: cmd_v_x={final_v_x:.4f} (forward/back), cmd_v_y={final_v_y:.4f} (left/right)")
-                        print(f"    Body frame (from file): v_x={v_x_body_val:.4f}, v_y={v_y_body_val:.4f}")
-                        print(f"    Smoothed body frame: v_x_body={v_x_body:.4f}, v_y_body={v_y_body:.4f}")
-                        print(f"    Final (clamped): final_v_x={final_v_x:.4f}, final_v_y={final_v_y:.4f}")
-                else:
-                    # Velocity is zero - no mobility command needed
-                    mobility_command = None
+                        print(f"[WALKING] Timestep {timestep}: Walking with arm movement")
+                        print(f"  Velocity: v_x={final_v_x:.4f} m/s (forward/back), v_y={final_v_y:.4f} m/s (left/right)")
+
+            # Check if we should send height adjustment (independent of velocity)
+            if not sending_velocity and height_offset is not None and abs(height_offset) > 0.001:
+                stand_cmd = RobotCommandBuilder.synchro_stand_command(
+                    body_height=height_offset,
+                    footprint_R_body=None
+                )
+                mobility_command = stand_cmd.synchronized_command.mobility_command
+                case_type = "ARM_WITH_HEIGHT"
+                if i % 10 == 0:
+                    print(f"[ARM_WITH_HEIGHT] Timestep {timestep}: Moving arm (standing), height offset={height_offset:.4f} m")
+            elif sending_velocity:
+                case_type = "WALKING"
+            else:
+                case_type = "ARM_ONLY"
+                if i % 10 == 0:
+                    print(f"[ARM_ONLY] Timestep {timestep}: Moving arm (no walking, no height adjustment)")
             
             if mobility_command is not None:
                 if gripper_command is not None:
@@ -423,8 +440,8 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 command_completed = False
                 
                 if i % 50 == 0:
-                    # Use v_x_body and v_y_body which are always defined
-                    print(f"  Velocity command: v_x={v_x_body:.4f}, v_y={v_y_body:.4f}, dt={loop_period:.3f}s, expiration={expiration_duration:.3f}s")
+                    # Use v_x_body_final and v_y_body_final which are always defined
+                    print(f"  Velocity command: v_x={v_x_body_final:.4f}, v_y={v_y_body_final:.4f}, dt={loop_period:.3f}s, expiration={expiration_duration:.3f}s")
             else:
                 cmd_id = command_client.robot_command(robot_command)
                 command_completed = False
