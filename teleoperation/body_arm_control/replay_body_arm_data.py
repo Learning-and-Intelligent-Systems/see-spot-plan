@@ -329,37 +329,10 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                     abs(body_yaw - last_commanded_body_yaw) > 0.01):
                     body_position_changed = True
             
-            # Minimal threshold for height (0.5mm) - PERFECT accuracy
-            # This matches the original working code exactly
-            height_command_needed = False
-            height_offset = None
-            if has_body_pose and body_z is not None and initial_body_z is not None:
-                # Check if we need to adjust based on recorded height
-                # Use the same threshold as the original working code
-                height_change_needed = (last_commanded_body_z is None or abs(body_z - last_commanded_body_z) > 0.0005)
-                
-                # Also check actual body height if available (from previous verification)
-                actual_height_check_needed = False
-                try:
-                    robot_state_check = get_robot_state(robot)
-                    odom_tform_body_check = get_odom_tform_body(robot_state_check.kinematic_state.transforms_snapshot)
-                    actual_body_z_check = odom_tform_body_check.position.z
-                    # If actual height is off by more than 2mm, force correction
-                    if abs(actual_body_z_check - body_z) > 0.002:
-                        actual_height_check_needed = True
-                except:
-                    pass
-                
-                if height_change_needed or actual_height_check_needed:
-                    height_offset = body_z - initial_body_z
-                    height_offset = max(-0.2, min(0.2, height_offset))
-                    height_command_needed = True
-                    
-                    if i % 10 == 0:
-                        last_cmd_str = f"{last_commanded_body_z:.6f}" if last_commanded_body_z is not None else "None"
-                        print(f"  DEBUG: Height adjustment needed: target_z={body_z:.6f}, last_commanded={last_cmd_str}, offset={height_offset:.6f}")
-            
+            # No runtime height control - only set initial height at start
+            # Let Spot's internal controller handle height during replay
             mobility_command = None
+            is_velocity_mobility = False  # Track whether mobility_command is a velocity command
             
             # Use velocity commands if velocity data is available (only x and y, no rotation)
             # NOTE: Velocities are now collected in body frame, so no transformation needed!
@@ -380,11 +353,9 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 velocity_magnitude = np.sqrt(v_x_body**2 + v_y_body**2)
                 
                 # Use a meaningful threshold - only send velocity commands when there's actual movement
-                # Very small velocities (< 0.01 m/s) are likely noise and should not block height commands
-                velocity_threshold = 0.01  # 1 cm/s - below this, treat as stationary (allow height commands)
+                velocity_threshold = 0.01  # 1 cm/s - below this, treat as stationary
                 
                 # Only send velocity commands when there's meaningful movement
-                # This allows height commands to work when body is stationary (arm moving)
                 if velocity_magnitude > velocity_threshold:
                     max_velocity = 1.5
                     final_v_x = max(-max_velocity, min(max_velocity, v_x_body))
@@ -400,6 +371,7 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                         v_rot=final_v_rot
                     )
                     mobility_command = velocity_cmd.synchronized_command.mobility_command
+                    is_velocity_mobility = True  # Mark this as a velocity command
                     
                     if i % 10 == 0:
                         print(f"  Velocity command: cmd_v_x={final_v_x:.4f} (forward/back), cmd_v_y={final_v_y:.4f} (left/right)")
@@ -407,28 +379,8 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                         print(f"    Smoothed body frame: v_x_body={v_x_body:.4f}, v_y_body={v_y_body:.4f}")
                         print(f"    Final (clamped): final_v_x={final_v_x:.4f}, final_v_y={final_v_y:.4f}")
                 else:
-                    # Velocity is zero - don't set mobility_command, let height command logic handle it
+                    # Velocity is zero - no mobility command needed
                     mobility_command = None
-                    if i % 10 == 0:
-                        print(f"  Velocity zero (v_x={v_x_body_val:.6f}, v_y={v_y_body_val:.6f}), will send stand command for height control")
-            
-            if height_command_needed and height_offset is not None and mobility_command is None:
-                footprint_R_body = None
-                if body_pitch is not None:
-                    footprint_R_body = EulerZXY(yaw=0.0, roll=0.0, pitch=body_pitch)
-                
-                stand_cmd = RobotCommandBuilder.synchro_stand_command(
-                    body_height=height_offset,
-                    footprint_R_body=footprint_R_body
-                )
-                mobility_command = stand_cmd.synchronized_command.mobility_command
-                last_commanded_body_z = body_z
-                if i % 10 == 0:
-                    orient_str = " (with orientation)" if footprint_R_body is not None else ""
-                    print(f"  ✓ Stand height command: offset={height_offset:.3f} m (z={body_z:.3f} m){orient_str}")
-            elif height_command_needed and i % 10 == 0:
-                # Debug: why didn't height command run?
-                print(f"  Height command needed but not sent: height_offset={height_offset}, mobility_command={'set' if mobility_command is not None else 'None'}")
             
             if mobility_command is not None:
                 if gripper_command is not None:
@@ -457,8 +409,7 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             # Velocity commands need an expiration time (end_time_secs)
             # The robot will either walk (velocity) OR move arm, not both simultaneously
             # Send commands continuously matching the original data collection timing
-            is_velocity_command = (mobility_command is not None and has_velocity_data)
-            if is_velocity_command:
+            if is_velocity_mobility:
                 loop_period = dt if has_timestamps else (1.0 / rate_hz)
                 
                 # Set expiration to ensure command persists until next command is sent
@@ -490,75 +441,25 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                     except:
                         pass
                     time.sleep(0.01)
-            
-            # If body moved (SE2 command), verify and correct height if needed
-            # SE2 commands can override height, so we check and adjust after movement
-            if body_position_changed and command_completed and has_body_pose and body_z is not None and initial_body_z is not None:
-                try:
-                    robot_state_check = get_robot_state(robot)
-                    odom_tform_body_check = get_odom_tform_body(robot_state_check.kinematic_state.transforms_snapshot)
-                    actual_body_z_check = odom_tform_body_check.position.z
-                    # If height is off by more than 1mm after SE2 movement, correct it
-                    if abs(actual_body_z_check - body_z) > 0.001:
-                        height_offset_followup = body_z - initial_body_z
-                        height_offset_followup = max(-0.2, min(0.2, height_offset_followup))
-                        
-                        # Only use roll and pitch in footprint_R_body, not yaw (yaw handled by SE2)
-                        # footprint_R_body yaw should be 0 (body aligned with footprint)
-                        footprint_R_body_followup = None
-                        if body_pitch is not None:
-                            footprint_R_body_followup = EulerZXY(yaw=0.0, roll=0.0, pitch=body_pitch)
-                        
-                        stand_cmd_followup = RobotCommandBuilder.synchro_stand_command(
-                            body_height=height_offset_followup,
-                            footprint_R_body=footprint_R_body_followup
-                        )
-                        followup_sync = synchronized_command_pb2.SynchronizedCommand.Request(
-                            arm_command=arm_command,
-                            mobility_command=stand_cmd_followup.synchronized_command.mobility_command
-                        )
-                        followup_robot_cmd = robot_command_pb2.RobotCommand(synchronized_command=followup_sync)
-                        command_client.robot_command(followup_robot_cmd)
-                        last_commanded_body_z = body_z
-                        if i % 10 == 0:
-                            print(f"  Height correction after SE2: offset={height_offset_followup:.3f} m (error was {abs(actual_body_z_check - body_z)*1000:.2f} mm)")
-                except:
-                    pass
-            
-                try:
-                    robot_state = get_robot_state(robot)
-                    joint_states = robot_state.kinematic_state.joint_states
-                    joint_dict = {js.name: js for js in joint_states}
                     
-                    # Verify arm positions
-                    max_error = 0.0
-                    for idx, joint_name in enumerate(arm_joint_names):
-                        if joint_name in joint_dict:
-                            actual_pos = joint_dict[joint_name].position.value
-                            commanded_pos = positions[idx]
-                            error = abs(actual_pos - commanded_pos)
-                            max_error = max(max_error, error)
-                    
-                    # Verify body height - critical for leg matching
-                    body_height_error = None
-                    if has_body_pose and body_z is not None:
-                        odom_tform_body = get_odom_tform_body(robot_state.kinematic_state.transforms_snapshot)
-                        actual_body_z = odom_tform_body.position.z
-                        body_height_error = abs(actual_body_z - body_z)
-                    
-                    if max_error > 0.03:  # Warn if error > 0.03 rad (~1.7 degrees)
-                        print(f"  WARNING: Arm position error at timestep {timestep}, max_error={max_error:.4f} rad (cmd_completed={command_completed})")
-                    
-                    if body_height_error is not None and body_height_error > 0.003:  # Warn if height error > 3mm
-                        print(f"  WARNING: Body height error at timestep {timestep}, error={body_height_error*1000:.2f} mm (target={body_z:.3f}, actual={actual_body_z:.3f})")
-                        
-                        # If height error is significant, adjust it in next command
-                        if body_height_error > 0.005:  # If error > 5mm, force correction
-                            # Will be corrected in next iteration by height command logic
-                            if i % 20 == 0:  # Print every 20 timesteps when correcting
-                                print(f"  Will correct body height in next command...")
-                except:
-                    pass
+            try:
+                robot_state = get_robot_state(robot)
+                joint_states = robot_state.kinematic_state.joint_states
+                joint_dict = {js.name: js for js in joint_states}
+                
+                # Verify arm positions
+                max_error = 0.0
+                for idx, joint_name in enumerate(arm_joint_names):
+                    if joint_name in joint_dict:
+                        actual_pos = joint_dict[joint_name].position.value
+                        commanded_pos = positions[idx]
+                        error = abs(actual_pos - commanded_pos)
+                        max_error = max(max_error, error)
+                
+                if max_error > 0.03:  # Warn if error > 0.03 rad (~1.7 degrees)
+                    print(f"  WARNING: Arm position error at timestep {timestep}, max_error={max_error:.4f} rad (cmd_completed={command_completed})")
+            except:
+                pass
             
             if i % 10 == 0:
                 data = positions_data[i]
@@ -605,7 +506,7 @@ def main():
     verify_estop(robot)
     robot.time_sync.wait_for_sync()
     
-    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251120_083836.txt")
+    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251120_153732.txt")
 
 
 if __name__ == "__main__":
