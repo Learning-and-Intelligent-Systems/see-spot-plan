@@ -25,7 +25,7 @@ def collect_body_arm_data():
     arm_joint_names = ["arm0.sh0", "arm0.sh1", "arm0.el0", "arm0.el1", "arm0.wr0", "arm0.wr1"]
     
     # Increased rate for PERFECT accuracy - higher sampling = smoother replay
-    rate_hz = 100.0
+    rate_hz = 50.0
     dt = 1.0 / rate_hz
 
     # Number of samples to average per timestep to reduce noise
@@ -49,8 +49,15 @@ def collect_body_arm_data():
         
         try:
             timestep = 0
+            # Store previous position and timestamp for velocity computation fallback
+            prev_body_x = None
+            prev_body_y = None
+            prev_body_yaw = None
+            prev_timestamp = None
+            
             while True:
                 loop_start_time = time.time()
+                current_timestamp = time.time()
                 
                 # Collect multiple samples and average to reduce noise for PERFECT accuracy
                 position_samples = [[] for _ in arm_joint_names]
@@ -101,24 +108,47 @@ def collect_body_arm_data():
                     
                     # Collect body velocity (velocity_of_body_in_odom)
                     # This gives us linear and angular velocity in the odom frame
+                    v_x = 0.0
+                    v_y = 0.0
+                    v_rot = 0.0
+                    
                     try:
+                        # Try to get velocity directly from robot state
                         if hasattr(robot_state.kinematic_state, 'velocity_of_body_in_odom'):
                             vel = robot_state.kinematic_state.velocity_of_body_in_odom
-                            # Linear velocity: x, y components (z is vertical, not used for SE2)
-                            v_x_samples.append(vel.linear.x)
-                            v_y_samples.append(vel.linear.y)
-                            # Angular velocity: z component (rotation around vertical axis)
-                            v_rot_samples.append(vel.angular.z)
+                            if vel is not None:
+                                # Linear velocity: x, y components (z is vertical, not used for SE2)
+                                if hasattr(vel, 'linear') and vel.linear is not None:
+                                    v_x = vel.linear.x if hasattr(vel.linear, 'x') else 0.0
+                                    v_y = vel.linear.y if hasattr(vel.linear, 'y') else 0.0
+                                    # Debug: verify velocity is being read
+                                    if timestep == 0 and sample_idx == 0:
+                                        print(f"  DEBUG: Successfully reading velocity from robot state")
+                                        print(f"  DEBUG: vel.linear type: {type(vel.linear)}, has x: {hasattr(vel.linear, 'x')}, has y: {hasattr(vel.linear, 'y')}")
+                                else:
+                                    if timestep == 0 and sample_idx == 0:
+                                        print(f"  WARNING: vel.linear is None or missing")
+                                # Angular velocity: z component (rotation around vertical axis)
+                                if hasattr(vel, 'angular') and vel.angular is not None:
+                                    v_rot = vel.angular.z if hasattr(vel.angular, 'z') else 0.0
+                            else:
+                                if timestep == 0 and sample_idx == 0:
+                                    print(f"  WARNING: velocity_of_body_in_odom is None")
                         else:
-                            # Fallback: compute from position if velocity not available
-                            v_x_samples.append(0.0)
-                            v_y_samples.append(0.0)
-                            v_rot_samples.append(0.0)
-                    except (AttributeError, KeyError):
-                        # Fallback: compute from position if velocity not available
-                        v_x_samples.append(0.0)
-                        v_y_samples.append(0.0)
-                        v_rot_samples.append(0.0)
+                            if timestep == 0 and sample_idx == 0:
+                                print(f"  WARNING: kinematic_state does not have velocity_of_body_in_odom attribute")
+                                print(f"  Available attributes: {dir(robot_state.kinematic_state)}")
+                    except (AttributeError, KeyError, TypeError) as e:
+                        # If direct velocity access fails, we'll compute from position differences
+                        # This will be handled below
+                        if timestep == 0 and sample_idx == 0:
+                            print(f"  Warning: Could not access velocity_of_body_in_odom directly: {e}")
+                            print(f"  Will compute velocity from position differences if needed")
+                    
+                    # Store velocity samples (will be 0.0 if not available, computed later if needed)
+                    v_x_samples.append(v_x)
+                    v_y_samples.append(v_y)
+                    v_rot_samples.append(v_rot)
                     
                     # Small delay between samples
                     if sample_idx < samples_per_timestep - 1:
@@ -143,6 +173,34 @@ def collect_body_arm_data():
                 v_y = sum(v_y_samples) / len(v_y_samples) if v_y_samples else 0.0
                 v_rot = sum(v_rot_samples) / len(v_rot_samples) if v_rot_samples else 0.0
                 
+                # Fallback: If velocity is zero or not available, compute from position differences
+                velocity_available = any(abs(v) > 1e-6 for v in v_x_samples + v_y_samples + v_rot_samples)
+                if not velocity_available and prev_body_x is not None and prev_timestamp is not None:
+                    # Compute velocity from position differences
+                    dt_vel = current_timestamp - prev_timestamp
+                    if dt_vel > 1e-6:  # Avoid division by zero
+                        v_x = (body_x - prev_body_x) / dt_vel
+                        v_y = (body_y - prev_body_y) / dt_vel
+                        # Handle yaw wrapping for angular velocity
+                        yaw_diff = body_yaw - prev_body_yaw
+                        # Normalize to [-pi, pi]
+                        while yaw_diff > np.pi:
+                            yaw_diff -= 2 * np.pi
+                        while yaw_diff < -np.pi:
+                            yaw_diff += 2 * np.pi
+                        v_rot = yaw_diff / dt_vel
+                    if timestep == 1:
+                        print("  Note: Computing velocity from position differences (direct velocity not available)")
+                        print(f"  Computed: v_x={v_x:.6f} m/s, v_y={v_y:.6f} m/s from position change")
+                elif not velocity_available and timestep == 1:
+                    print("  WARNING: No velocity data available and cannot compute from position (first timestep)")
+                
+                # Update previous values for next iteration
+                prev_body_x = body_x
+                prev_body_y = body_y
+                prev_body_yaw = body_yaw
+                prev_timestamp = current_timestamp
+                
                 print(f"[Timestep {timestep}]")
                 for idx, joint_name in enumerate(arm_joint_names):
                     if idx < len(positions):
@@ -151,10 +209,17 @@ def collect_body_arm_data():
                 gripper_status = "OPEN" if gripper_normalized > 0.8 else ("CLOSING" if gripper_normalized > 0.2 else "CLOSED")
                 print(f"  gripper: {gripper_normalized:.6f} [{gripper_status}] (avg of {samples_per_timestep} samples)")
                 print(f"  body: x={body_x:.6f} m, y={body_y:.6f} m, z={body_z:.6f} m, yaw={body_yaw:.6f} rad (avg of {samples_per_timestep} samples)")
-                print(f"  velocity: v_x={v_x:.6f} m/s, v_y={v_y:.6f} m/s, v_rot={v_rot:.6f} rad/s (avg of {samples_per_timestep} samples)")
+                # Check if velocities seem reasonable
+                velocity_magnitude = np.sqrt(v_x**2 + v_y**2)
+                if timestep % 50 == 0:  # Every 50 timesteps, show more detail
+                    print(f"  velocity: v_x={v_x:.6f} m/s, v_y={v_y:.6f} m/s, v_rot={v_rot:.6f} rad/s (magnitude={velocity_magnitude:.6f} m/s)")
+                    print(f"    velocity samples: v_x range=[{min(v_x_samples):.6f}, {max(v_x_samples):.6f}], v_y range=[{min(v_y_samples):.6f}, {max(v_y_samples):.6f}]")
+                else:
+                    print(f"  velocity: v_x={v_x:.6f} m/s, v_y={v_y:.6f} m/s, v_rot={v_rot:.6f} rad/s (avg of {samples_per_timestep} samples)")
                 print()
                 
-                timestamp_utc = time.time()
+                # Use the timestamp we captured at the start of the loop for consistency
+                timestamp_utc = current_timestamp
                 f.write(f"{timestep}, {timestamp_utc}, {', '.join(f'{p:.9f}' for p in positions)}, {gripper_normalized:.9f}, {body_x:.9f}, {body_y:.9f}, {body_z:.9f}, {body_yaw:.9f}, {body_pitch:.9f}, {v_x:.9f}, {v_y:.9f}, {v_rot:.9f}\n")
                 f.flush()
                 
