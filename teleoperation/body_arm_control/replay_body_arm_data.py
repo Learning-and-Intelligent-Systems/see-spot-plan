@@ -405,27 +405,6 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                         abs(smoothed_height_offset - last_commanded_height_offset) > height_change_threshold):
                         height_needs_correction = True
                 
-                # Periodically check actual robot height vs desired height (every 50 timesteps ~1 second)
-                if i % 50 == 0 and desired_height_z is not None:
-                    try:
-                        robot_state_check = get_robot_state(robot)
-                        odom_tform_body_check = get_odom_tform_body(robot_state_check.kinematic_state.transforms_snapshot)
-                        actual_height = odom_tform_body_check.position.z
-                        desired_height_absolute = initial_body_z + smoothed_height_offset
-                        height_error = actual_height - desired_height_absolute
-                        # If actual height is off by more than 1cm, correct it
-                        if abs(height_error) > 0.01:
-                            print(f"  Height drift detected: desired={desired_height_absolute:.4f} m, actual={actual_height:.4f} m, error={height_error:.4f} m")
-                            # Recalculate height_offset to correct for drift
-                            # The offset should be relative to initial_body_z, but compensate for drift
-                            height_offset = desired_height_z - initial_body_z - height_error
-                            height_offset = max(-0.1, min(0.1, height_offset))
-                            # Update smoothed height to match corrected offset
-                            smoothed_height_offset = height_offset
-                            height_needs_correction = True
-                    except Exception as e:
-                        if i % 250 == 0:  # Only print every 5 seconds to avoid spam
-                            print(f"  Warning: Could not check actual robot height: {e}")
 
             # Send height adjustment command when needed (using smoothed value)
             if height_needs_correction and height_offset is not None:
