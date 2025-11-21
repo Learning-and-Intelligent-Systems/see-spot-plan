@@ -227,6 +227,10 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
     smoothed_v_x_odom = 0.0
     smoothed_v_y_odom = 0.0
     
+    # Initialize smoothed height offset for smooth height transitions
+    smoothed_height_offset = 0.0
+    last_commanded_height_offset = None
+    
     try:
         i = 0
         while i < len(positions_data):
@@ -338,7 +342,9 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
 
             # Calculate height offset for stand command
             height_offset = None
+            desired_height_z = None
             if has_body_pose and body_z is not None and initial_body_z is not None:
+                desired_height_z = body_z
                 height_offset = body_z - initial_body_z
                 height_offset = max(-0.1, min(0.1, height_offset))
 
@@ -382,16 +388,66 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                         print(f"[WALKING] Timestep {timestep}: Walking with arm movement")
                         print(f"  Velocity: v_x={final_v_x:.4f} m/s (forward/back), v_y={final_v_y:.4f} m/s (left/right)")
 
-            # Check if we should send height adjustment (independent of velocity)
-            if not sending_velocity and height_offset is not None and abs(height_offset) > 0.001:
-                stand_cmd = RobotCommandBuilder.synchro_stand_command(
-                    body_height=height_offset,
-                    footprint_R_body=None
-                )
+            # ALWAYS check and correct height when not walking - maintain height accuracy
+            # Check height adjustment when stationary (not sending velocity commands)
+            height_needs_correction = False
+            if not sending_velocity:
+                if height_offset is not None:
+                    # Smooth height changes using exponential moving average for smooth transitions
+                    # Lower alpha (0.15) for smoother, slower height changes
+                    height_alpha = 0.15
+                    smoothed_height_offset = height_alpha * height_offset + (1 - height_alpha) * smoothed_height_offset if i > 0 else height_offset
+                    
+                    # Check if smoothed height has changed significantly from last commanded height
+                    # Use a slightly higher threshold (1mm) to avoid too frequent corrections
+                    height_change_threshold = 0.001  # 1mm - smooth transitions
+                    if (last_commanded_height_offset is None or 
+                        abs(smoothed_height_offset - last_commanded_height_offset) > height_change_threshold):
+                        height_needs_correction = True
+                
+                # Periodically check actual robot height vs desired height (every 50 timesteps ~1 second)
+                if i % 50 == 0 and desired_height_z is not None:
+                    try:
+                        robot_state_check = get_robot_state(robot)
+                        odom_tform_body_check = get_odom_tform_body(robot_state_check.kinematic_state.transforms_snapshot)
+                        actual_height = odom_tform_body_check.position.z
+                        desired_height_absolute = initial_body_z + smoothed_height_offset
+                        height_error = actual_height - desired_height_absolute
+                        # If actual height is off by more than 1cm, correct it
+                        if abs(height_error) > 0.01:
+                            print(f"  Height drift detected: desired={desired_height_absolute:.4f} m, actual={actual_height:.4f} m, error={height_error:.4f} m")
+                            # Recalculate height_offset to correct for drift
+                            # The offset should be relative to initial_body_z, but compensate for drift
+                            height_offset = desired_height_z - initial_body_z - height_error
+                            height_offset = max(-0.1, min(0.1, height_offset))
+                            # Update smoothed height to match corrected offset
+                            smoothed_height_offset = height_offset
+                            height_needs_correction = True
+                    except Exception as e:
+                        if i % 250 == 0:  # Only print every 5 seconds to avoid spam
+                            print(f"  Warning: Could not check actual robot height: {e}")
+
+            # Send height adjustment command when needed (using smoothed value)
+            if height_needs_correction and height_offset is not None:
+                # Use smoothed height offset for smooth transitions
+                final_height_offset = max(-0.1, min(0.1, smoothed_height_offset))
+                
+                # Only pass footprint_R_body if we have orientation data, otherwise omit it
+                if body_pitch is not None:
+                    footprint_R_body = EulerZXY(yaw=0.0, roll=0.0, pitch=body_pitch)
+                    stand_cmd = RobotCommandBuilder.synchro_stand_command(
+                        body_height=final_height_offset,
+                        footprint_R_body=footprint_R_body
+                    )
+                else:
+                    stand_cmd = RobotCommandBuilder.synchro_stand_command(
+                        body_height=final_height_offset
+                    )
                 mobility_command = stand_cmd.synchronized_command.mobility_command
+                last_commanded_height_offset = final_height_offset
                 case_type = "ARM_WITH_HEIGHT"
                 if i % 10 == 0:
-                    print(f"[ARM_WITH_HEIGHT] Timestep {timestep}: Moving arm (standing), height offset={height_offset:.4f} m")
+                    print(f"[ARM_WITH_HEIGHT] Timestep {timestep}: Moving arm (standing), height offset={final_height_offset:.4f} m (smoothed from {height_offset:.4f} m)")
             elif sending_velocity:
                 case_type = "WALKING"
             else:
@@ -523,7 +579,7 @@ def main():
     verify_estop(robot)
     robot.time_sync.wait_for_sync()
     
-    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251120_153732.txt")
+    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251120_171339.txt")
 
 
 if __name__ == "__main__":
