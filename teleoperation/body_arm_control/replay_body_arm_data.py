@@ -123,6 +123,7 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
 
     smoothed_height_offset = 0.0
     last_commanded_height_offset = None
+    last_arm_positions = None  # Track last sent arm positions to detect stationarity
 
     try:
         i = 0
@@ -138,50 +139,60 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             else:
                 dt = 1.0 / rate_hz
 
+            # Check if arm position has changed since last command
+            current_positions = positions_data[i][2]
+            arm_position_changed = (
+                last_arm_positions is None or
+                not np.allclose(current_positions, last_arm_positions, atol=1e-4)
+            )
+
             trajectory_points = []
+            arm_command = None  # Only set if arm needs to move
 
-            trajectory_time = max(dt, 0.03)
+            if arm_position_changed:
+                trajectory_time = max(dt, 0.03)
 
-            for j in range(min(actual_window_size, len(positions_data) - i)):
-                data = positions_data[i + j]
-                timestep = data[0]
-                timestamp_utc = data[1]
-                positions = data[2]
-                gripper = data[3]
-                body_x = data[4]
-                body_y = data[5]
-                body_z = data[6]
-                body_yaw = data[7]
-                body_roll = data[8]
-                body_pitch = data[9]
+                for j in range(min(actual_window_size, len(positions_data) - i)):
+                    data = positions_data[i + j]
+                    timestep = data[0]
+                    timestamp_utc = data[1]
+                    positions = data[2]
+                    gripper = data[3]
+                    body_x = data[4]
+                    body_y = data[5]
+                    body_z = data[6]
+                    body_yaw = data[7]
+                    body_roll = data[8]
+                    body_pitch = data[9]
 
-                point = RobotCommandBuilder.create_arm_joint_trajectory_point(
-                    positions[0],
-                    positions[1],
-                    positions[2],
-                    positions[3],
-                    positions[4],
-                    positions[5],
-                    time_since_reference_secs=trajectory_time,
+                    point = RobotCommandBuilder.create_arm_joint_trajectory_point(
+                        positions[0],
+                        positions[1],
+                        positions[2],
+                        positions[3],
+                        positions[4],
+                        positions[5],
+                        time_since_reference_secs=trajectory_time,
+                    )
+                    trajectory_points.append(point)
+
+                # Remove velocity/acceleration limits for maximum accuracy
+                max_vel = wrappers_pb2.DoubleValue(value=15.0)
+                max_acc = wrappers_pb2.DoubleValue(value=30.0)
+
+                arm_joint_traj = arm_command_pb2.ArmJointTrajectory(
+                    points=trajectory_points,
+                    maximum_velocity=max_vel,
+                    maximum_acceleration=max_acc,
                 )
-                trajectory_points.append(point)
 
-            # Remove velocity/acceleration limits for maximum accuracy
-            max_vel = wrappers_pb2.DoubleValue(value=15.0)
-            max_acc = wrappers_pb2.DoubleValue(value=30.0)
-
-            arm_joint_traj = arm_command_pb2.ArmJointTrajectory(
-                points=trajectory_points,
-                maximum_velocity=max_vel,
-                maximum_acceleration=max_acc,
-            )
-
-            joint_move_command = arm_command_pb2.ArmJointMoveCommand.Request(
-                trajectory=arm_joint_traj
-            )
-            arm_command = arm_command_pb2.ArmCommand.Request(
-                arm_joint_move_command=joint_move_command
-            )
+                joint_move_command = arm_command_pb2.ArmJointMoveCommand.Request(
+                    trajectory=arm_joint_traj
+                )
+                arm_command = arm_command_pb2.ArmCommand.Request(
+                    arm_joint_move_command=joint_move_command
+                )
+                last_arm_positions = current_positions
 
             data = positions_data[i]
             timestep = data[0]
@@ -303,25 +314,46 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
 
             if mobility_command is not None:
                 if gripper_command is not None:
+                    if arm_command is not None:
+                        sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
+                            arm_command=arm_command,
+                            gripper_command=gripper_command,
+                            mobility_command=mobility_command
+                        )
+                    else:
+                        sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
+                            gripper_command=gripper_command,
+                            mobility_command=mobility_command
+                        )
+                else:
+                    if arm_command is not None:
+                        sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
+                            arm_command=arm_command,
+                            mobility_command=mobility_command
+                        )
+                    else:
+                        sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
+                            mobility_command=mobility_command
+                        )
+            elif gripper_command is not None:
+                if arm_command is not None:
                     sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
                         arm_command=arm_command,
-                        gripper_command=gripper_command,
-                        mobility_command=mobility_command
+                        gripper_command=gripper_command
                     )
                 else:
                     sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
-                        arm_command=arm_command,
-                        mobility_command=mobility_command
+                        gripper_command=gripper_command
                     )
-            elif gripper_command is not None:
-                sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
-                    arm_command=arm_command,
-                    gripper_command=gripper_command
-                )
             else:
-                sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
-                    arm_command=arm_command
-                )
+                if arm_command is not None:
+                    sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
+                        arm_command=arm_command
+                    )
+                else:
+                    # No commands to send - skip this iteration
+                    i += 1
+                    continue
 
             robot_command = robot_command_pb2.RobotCommand(synchronized_command=sync_command)
 
