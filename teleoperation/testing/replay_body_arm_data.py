@@ -17,7 +17,7 @@ import numpy as np
 from spot_utils.utils import get_robot_state, verify_estop
 
 
-def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
+def replay_body_arm_data(robot, filename, rate_hz=100.0, window_size=3):
     print(f"\nReading data from: {filename}")
 
     positions_data = []
@@ -150,7 +150,7 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
             arm_command = None  # Only set if arm needs to move
 
             if arm_position_changed:
-                trajectory_time = max(dt, 0.03)
+                trajectory_time = dt  # Use actual timestep duration for smooth replay
 
                 for j in range(min(actual_window_size, len(positions_data) - i)):
                     data = positions_data[i + j]
@@ -357,9 +357,8 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
 
             robot_command = robot_command_pb2.RobotCommand(synchronized_command=sync_command)
 
-            # Velocity commands need an expiration time (end_time_secs)
-            # The robot will either walk (velocity) OR move arm, not both simultaneously
             # Send commands continuously matching the original data collection timing
+            # Don't wait for completion - send next command immediately for smooth replay
             if is_velocity_mobility:
                 loop_period = dt
                 expiration_duration = loop_period * 2.0 + 0.05  # Cover next 2 timesteps + 50ms buffer
@@ -371,19 +370,8 @@ def replay_body_arm_data(robot, filename, rate_hz=50.0, window_size=3):
                 if i % 50 == 0:
                     print(f"  Velocity command: v_x={v_x_body_final:.4f}, v_y={v_y_body_final:.4f}, dt={loop_period:.3f}s, expiration={expiration_duration:.3f}s")
             else:
+                # Send arm command without waiting for completion - continuous streaming for smooth replay
                 cmd_id = command_client.robot_command(robot_command)
-                timeout = max(trajectory_time * 2.5, 0.2)
-                start_wait = time.time()
-                while time.time() - start_wait < timeout:
-                    try:
-                        feedback = command_client.robot_command_feedback(cmd_id)
-                        arm_feedback = feedback.feedback.synchronized_feedback.arm_command_feedback
-                        if hasattr(arm_feedback, 'arm_joint_move_feedback'):
-                            if arm_feedback.arm_joint_move_feedback.status == 2:  # STATUS_COMPLETE
-                                break
-                    except:
-                        pass
-                    time.sleep(0.01)
 
             i += 1
 
@@ -410,7 +398,7 @@ def main():
     verify_estop(robot)
     robot.time_sync.wait_for_sync()
 
-    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251123_164133.txt")
+    replay_body_arm_data(robot, "teleoperation_data/body_arm_20251124_135422.txt")
 
 
 if __name__ == "__main__":

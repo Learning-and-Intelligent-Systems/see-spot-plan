@@ -25,7 +25,7 @@ def collect_body_arm_data():
     arm_joint_names = ["arm0.sh0", "arm0.sh1", "arm0.el0", "arm0.el1", "arm0.wr0", "arm0.wr1"]
     
     # Increased rate for PERFECT accuracy - higher sampling = smoother replay
-    rate_hz = 50.0
+    rate_hz = 100.0
     dt = 1.0 / rate_hz
 
     # Number of samples to average per timestep to reduce noise
