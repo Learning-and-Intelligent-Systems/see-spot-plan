@@ -221,6 +221,9 @@ def collect_body_arm_data_formatted():
             sleep_time = max(0, dt - elapsed)
             time.sleep(sleep_time)
 
+    except KeyboardInterrupt:
+        print(f"\nStopped. Collected {len(qpos_data)} timesteps.")
+
         # Convert to numpy arrays
         qpos_array = np.array(qpos_data, dtype=np.float64)
         body_pose_array = np.array(body_pose_data, dtype=np.float64)
@@ -250,9 +253,6 @@ def collect_body_arm_data_formatted():
         print(f'  observations/body_pose: {body_pose_array.shape}  (x, y, z, yaw, pitch, roll)')
         print(f'  observations/body_vel: {body_vel_array.shape}  (v_x, v_y, v_rot)')
         print(f'  action: {action_array.shape}  (arm_joints[6] + gripper[1] + body_pose[6] + body_vel[3])')
-
-    except KeyboardInterrupt:
-        print(f"\nStopped. Collected {len(qpos_data)} timesteps.")
 
 
 def main():
