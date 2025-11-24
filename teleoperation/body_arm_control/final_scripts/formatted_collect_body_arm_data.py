@@ -11,16 +11,30 @@ import os
 import time
 import h5py
 from datetime import datetime
+import threading
 
 from bosdyn.client import create_standard_sdk
 from bosdyn.client.frame_helpers import get_odom_tform_body
 from bosdyn.client.util import authenticate
 import numpy as np
+import cv2
 
 from spot_utils.utils import get_robot_state, verify_estop
 
+# Import ZED and Kiwi streaming utilities
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'utils'))
+from zed import stream_zed_frames
+from kiwi import start_kiwi_server, stream_kiwi_frames
+
 
 def collect_body_arm_data_formatted():
+    # ===== CONFIGURATION =====
+    USE_ZED = True  # Set to False to disable ZED camera
+    USE_KIWI = True  # Set to False to disable iPhone camera
+    KIWI_PORT = 8888  # TCP port for Kiwi iPhone camera server
+    # ===== END CONFIGURATION =====
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--hostname", type=str, required=True)
     args = parser.parse_args()
@@ -32,7 +46,6 @@ def collect_body_arm_data_formatted():
     robot.time_sync.wait_for_sync()
 
     arm_joint_names = ["arm0.sh0", "arm0.sh1", "arm0.el0", "arm0.el1", "arm0.wr0", "arm0.wr1"]
-    num_arm_joints = len(arm_joint_names)
 
     # Collection parameters - match original collect_body_arm_data.py
     rate_hz = 100.0
@@ -60,6 +73,63 @@ def collect_body_arm_data_formatted():
     body_vel_data = []  # v_x, v_y, v_rot in body frame
     action_data = []  # same as qpos for now (observations become actions in ACT)
     timestamps = []  # actual UTC timestamps for accurate replay timing
+    zed_rgb_data = []  # RGB images from ZED camera
+    kiwi_rgb_data = []  # RGB images from Kiwi iPhone camera (optional)
+
+    # Start ZED camera streaming in background thread
+    latest_zed_frame = {"rgb": None}
+    zed_lock = threading.Lock()
+    stop_zed_streaming = threading.Event()
+
+    def zed_stream_worker():
+        """Background thread that streams ZED frames."""
+        try:
+            for rgb_bgr, _ in stream_zed_frames():
+                if stop_zed_streaming.is_set():
+                    break
+                with zed_lock:
+                    # Convert BGR to RGB for storage
+                    rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+                    latest_zed_frame["rgb"] = rgb.copy()
+        except Exception as e:
+            print(f"ZED streaming error: {e}")
+
+    zed_thread = threading.Thread(target=zed_stream_worker, daemon=True)
+    zed_thread.start()
+    print("Started ZED camera streaming...")
+    time.sleep(1.0)  # Give ZED time to start
+
+    # Start Kiwi camera streaming if requested
+    kiwi_conn = None
+    kiwi_thread = None
+    latest_kiwi_frame = {"rgb": None}
+    kiwi_lock = threading.Lock()
+    stop_kiwi_streaming = threading.Event()
+    kiwi_server_thread = None
+    kiwi_connection_event = threading.Event()
+
+    def kiwi_server_worker():
+        """Background thread that starts Kiwi server and waits for connection."""
+        nonlocal kiwi_conn
+        try:
+            print("Starting Kiwi iPhone camera server...")
+            kiwi_conn, kiwi_addr = start_kiwi_server(port=KIWI_PORT)
+            print(f"Kiwi iPhone camera connected from {kiwi_addr[0]}:{kiwi_addr[1]}")
+            kiwi_connection_event.set()  # Signal that connection is ready
+
+            # Now stream frames
+            for rgb, depth, transform, intrinsics, frame_number in stream_kiwi_frames(kiwi_conn):
+                if stop_kiwi_streaming.is_set():
+                    break
+                with kiwi_lock:
+                    latest_kiwi_frame["rgb"] = rgb.copy()
+        except Exception as e:
+            print(f"Kiwi streaming error: {e}")
+
+    if USE_KIWI:
+        kiwi_server_thread = threading.Thread(target=kiwi_server_worker, daemon=True)
+        kiwi_server_thread.start()
+        print("Waiting for Kiwi iPhone camera connection...")
 
     try:
         timestep = 0
@@ -160,6 +230,24 @@ def collect_body_arm_data_formatted():
             action_data.append(qpos)  # Action includes all DOF: arm joints + gripper + body pose + body velocity
             timestamps.append(current_timestamp)  # Store actual UTC timestamp
 
+            # Capture latest RGB frames from cameras
+            # ZED camera (always on)
+            with zed_lock:
+                if latest_zed_frame["rgb"] is not None:
+                    zed_rgb_data.append(latest_zed_frame["rgb"].copy())
+                else:
+                    # If no frame available yet, use black image as placeholder
+                    zed_rgb_data.append(np.zeros((720, 1280, 3), dtype=np.uint8))
+
+            # Kiwi iPhone camera (if enabled)
+            if USE_KIWI:
+                with kiwi_lock:
+                    if latest_kiwi_frame["rgb"] is not None:
+                        kiwi_rgb_data.append(latest_kiwi_frame["rgb"].copy())
+                    else:
+                        # Use black image as placeholder
+                        kiwi_rgb_data.append(np.zeros((1080, 1440, 3), dtype=np.uint8))
+
             # Update previous values
             prev_body_x = body_x
             prev_body_y = body_y
@@ -186,12 +274,27 @@ def collect_body_arm_data_formatted():
     except KeyboardInterrupt:
         print(f"\nStopped. Collected {len(qpos_data)} timesteps.")
 
+        # Stop ZED streaming
+        stop_zed_streaming.set()
+        zed_thread.join(timeout=2.0)
+        print("Stopped ZED camera streaming")
+
+        # Stop Kiwi streaming if active
+        if USE_KIWI and kiwi_server_thread:
+            stop_kiwi_streaming.set()
+            kiwi_server_thread.join(timeout=2.0)
+            if kiwi_conn:
+                kiwi_conn.close()
+            print("Stopped Kiwi iPhone camera streaming")
+
         # Convert to numpy arrays
         qpos_array = np.array(qpos_data, dtype=np.float64)
         body_pose_array = np.array(body_pose_data, dtype=np.float64)
         body_vel_array = np.array(body_vel_data, dtype=np.float64)
         action_array = np.array(action_data, dtype=np.float64)
         timestamps_array = np.array(timestamps, dtype=np.float64)
+        zed_rgb_array = np.array(zed_rgb_data, dtype=np.uint8)
+        kiwi_rgb_array = np.array(kiwi_rgb_data, dtype=np.uint8) if USE_KIWI else None
 
         # Write to HDF5 file
         print(f"\nSaving {len(qpos_data)} timesteps to {dataset_path}...")
@@ -208,6 +311,15 @@ def collect_body_arm_data_formatted():
             obs.create_dataset('body_vel', data=body_vel_array, dtype='float64')
             obs.create_dataset('timestamps', data=timestamps_array, dtype='float64')
 
+            # Save images in a separate group
+            images = obs.create_group('images')
+            images.create_dataset('zed', data=zed_rgb_array, dtype='uint8',
+                                  chunks=(1, 720, 1280, 3), compression='gzip', compression_opts=4)
+
+            if USE_KIWI and kiwi_rgb_array is not None:
+                images.create_dataset('kiwi', data=kiwi_rgb_array, dtype='uint8',
+                                      chunks=(1, 1080, 1440, 3), compression='gzip', compression_opts=4)
+
             root.create_dataset('action', data=action_array, dtype='float64')
 
         print(f'Saving completed in {time.time() - t0:.1f} seconds')
@@ -216,6 +328,9 @@ def collect_body_arm_data_formatted():
         print(f'  observations/qpos: {qpos_array.shape}  (arm_joints[6] + gripper[1] + body_pose[6] + body_vel[3])')
         print(f'  observations/body_pose: {body_pose_array.shape}  (x, y, z, yaw, pitch, roll)')
         print(f'  observations/body_vel: {body_vel_array.shape}  (v_x, v_y, v_rot)')
+        print(f'  observations/images/zed: {zed_rgb_array.shape}  (timesteps, 720, 1280, 3) - RGB uint8')
+        if USE_KIWI and kiwi_rgb_array is not None:
+            print(f'  observations/images/kiwi: {kiwi_rgb_array.shape}  (timesteps, 1080, 1440, 3) - RGB uint8')
         print(f'  action: {action_array.shape}  (arm_joints[6] + gripper[1] + body_pose[6] + body_vel[3])')
 
 

@@ -19,6 +19,8 @@ setup(
         "opencv-python == 4.7.0.72",
         "dill",
         "scipy",
+        "Pillow",
+        "rerun-sdk",
     ],
     include_package_data=True,
     extras_require={"develop": ["ruff==0.9.8"]},
