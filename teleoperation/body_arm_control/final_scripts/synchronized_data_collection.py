@@ -3,15 +3,18 @@
 Synchronized Data Collection Server (runs on GPU machine)
 
 This server:
-1. Streams ZED frames at native ~12 Hz in background thread
-2. Streams Kiwi frames at native ~5 Hz in background thread
+1. Streams ZED frames at native frequency in background thread
+2. Streams Kiwi frames at native frequency in background thread
 3. Listens for joint data from Mac client at ~50 Hz on separate thread
 4. Creates a master time grid at policy frequency (e.g., 20 Hz)
-5. Resamples all data to align with master grid:
-   - Joint data: interpolate (50 Hz → 20 Hz downsampling)
-   - ZED images: upsample with nearest neighbor (~12 Hz → 20 Hz)
-   - Kiwi images: upsample with nearest neighbor (~5 Hz → 20 Hz)
+5. Intelligently resamples all data to align with master grid:
+   - Joint data: linear interpolation (handles any downsampling/upsampling)
+   - ZED images: nearest neighbor, automatically detects if downsampling or upsampling
+   - Kiwi images: nearest neighbor, automatically detects if downsampling or upsampling
 6. Saves synchronized data to HDF5 in ACT++ format
+
+Note: Resampling is fully adaptive - source frequencies are detected automatically
+from the collected data timestamps, no hardcoded assumptions about Hz values.
 
 Architecture:
     ┌─────────────────────────────────────────────────────────┐
@@ -44,7 +47,7 @@ Architecture:
     │                   │                                    │
     │         ┌─────────▼──────────────┐                     │
     │         │ HDF5 Writer (ACT++)    │                     │
-    │         │ qpos, qvel, action     │                     │
+    │         │ qpos, action           │                     │
     │         │ arm_camera, zed_camera │                     │
     │         └────────────────────────┘                     │
     └─────────────────────────────────────────────────────────┘
@@ -151,6 +154,25 @@ class CircularTimestampBuffer:
         with self.lock:
             return list(self.buffer)
 
+    def get_sampling_frequency(self) -> float:
+        """
+        Estimate sampling frequency in Hz based on timestamp deltas.
+        Uses median of time deltas to be robust to outliers.
+        """
+        with self.lock:
+            if len(self.buffer) < 3:
+                return 0.0
+
+            items = sorted(list(self.buffer), key=lambda x: x.timestamp)
+            time_deltas = [items[i+1].timestamp - items[i].timestamp
+                          for i in range(len(items)-1)]
+
+            # Use median to be robust to outliers
+            median_delta = np.median(time_deltas)
+            if median_delta > 0:
+                return 1.0 / median_delta
+            return 0.0
+
 
 def recv_exact(sock: socket.socket, num_bytes: int) -> Optional[bytes]:
     """Receive exactly num_bytes from socket"""
@@ -166,6 +188,37 @@ def recv_exact(sock: socket.socket, num_bytes: int) -> Optional[bytes]:
     return data
 
 
+def wait_for_client_connection(
+    server_sock: socket.socket,
+    device_name: str,
+    timeout_seconds: float = 60.0
+) -> Optional[socket.socket]:
+    """
+    Wait for a client connection with timeout.
+
+    Args:
+        server_sock: Server socket in listening state
+        device_name: Name of device (e.g., "Mac", "iPhone")
+        timeout_seconds: Maximum time to wait for connection
+
+    Returns:
+        Connected socket or None if timeout
+    """
+    server_sock.settimeout(timeout_seconds)
+    try:
+        logger.info(f"Waiting for {device_name} client connection (timeout: {timeout_seconds}s)...")
+        conn, addr = server_sock.accept()
+        conn.settimeout(10.0)
+        logger.info(f"{device_name} client connected from {addr[0]}:{addr[1]}")
+        return conn
+    except socket.timeout:
+        logger.error(f"Timeout waiting for {device_name} client (no connection within {timeout_seconds}s)")
+        return None
+    except Exception as e:
+        logger.error(f"Error accepting {device_name} connection: {e}")
+        return None
+
+
 def start_joint_server(port: int = 9999) -> socket.socket:
     """Start TCP server for joint data from Mac"""
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -174,13 +227,8 @@ def start_joint_server(port: int = 9999) -> socket.socket:
     server_sock.listen(1)
 
     logger.info(f"Joint server listening on 0.0.0.0:{port}")
-    logger.info("Waiting for Mac client connection...")
 
-    conn, addr = server_sock.accept()
-    conn.settimeout(10.0)
-    logger.info(f"Joint client connected from {addr[0]}:{addr[1]}")
-
-    return conn
+    return server_sock
 
 
 def start_kiwi_server(port: int = 8888) -> socket.socket:
@@ -191,13 +239,8 @@ def start_kiwi_server(port: int = 8888) -> socket.socket:
     server_sock.listen(1)
 
     logger.info(f"Kiwi server listening on 0.0.0.0:{port}")
-    logger.info("Waiting for iPhone client connection...")
 
-    conn, addr = server_sock.accept()
-    conn.settimeout(10.0)
-    logger.info(f"Kiwi client connected from {addr[0]}:{addr[1]}")
-
-    return conn
+    return server_sock
 
 
 def stream_joint_data_worker(conn: socket.socket, buffer: CircularTimestampBuffer, disconnect_event: threading.Event):
@@ -431,68 +474,56 @@ def create_master_time_grid(
     return np.linspace(start_time, start_time + (num_steps - 1) * dt, num_steps)
 
 
-def resample_joint_data(
+def intelligently_resample_data(
     buffer: CircularTimestampBuffer,
-    master_grid: np.ndarray
+    master_grid: np.ndarray,
+    data_type: str = 'discrete'
 ) -> List[Optional[np.ndarray]]:
     """
-    Resample joint data to master grid using linear interpolation.
+    Intelligently resample data based on source vs target frequency.
+
+    This function automatically detects whether the source frequency is higher
+    or lower than the policy frequency and applies the appropriate resampling
+    method:
+    - Continuous data (joint positions): Uses linear interpolation
+    - Discrete data (images): Uses nearest neighbor
 
     Args:
-        buffer: CircularTimestampBuffer with joint data
-        master_grid: Array of target timestamps
+        buffer: CircularTimestampBuffer with timestamped data
+        master_grid: Target timestamps at policy frequency
+        data_type: Either 'continuous' (joint data) or 'discrete' (image data)
 
     Returns:
-        List of joint data at each master grid timestamp
+        List of resampled data at each master grid timestamp
     """
+    # Estimate source frequency
+    source_hz = buffer.get_sampling_frequency()
+    policy_hz = 1.0 / (master_grid[1] - master_grid[0]) if len(master_grid) > 1 else 0
+
+    logger.info(f"  Resampling {data_type} data: source={source_hz:.2f} Hz, target={policy_hz:.2f} Hz")
+
     resampled = []
-    for target_time in master_grid:
-        data = buffer.interpolate_at_time(target_time)
-        resampled.append(data)
+
+    if data_type == 'continuous':
+        # For continuous data (joint positions), use linear interpolation
+        # This works well for both upsampling and downsampling
+        for target_time in master_grid:
+            data = buffer.interpolate_at_time(target_time)
+            resampled.append(data)
+
+    else:  # 'discrete' (images)
+        # For discrete data (images), always use nearest neighbor
+        # Log when we're downsampling for monitoring
+        if source_hz > policy_hz * 1.1:
+            logger.debug(f"    Downsampling images: {source_hz:.2f} Hz → {policy_hz:.2f} Hz")
+        elif source_hz < policy_hz * 0.9:
+            logger.debug(f"    Upsampling images: {source_hz:.2f} Hz → {policy_hz:.2f} Hz")
+
+        for target_time in master_grid:
+            data = buffer.get_at_time(target_time)
+            resampled.append(data)
+
     return resampled
-
-
-def resample_image_data(
-    buffer: CircularTimestampBuffer,
-    master_grid: np.ndarray
-) -> List[Optional[np.ndarray]]:
-    """
-    Resample image data to master grid using nearest neighbor (upsample).
-
-    Args:
-        buffer: CircularTimestampBuffer with image data
-        master_grid: Array of target timestamps
-
-    Returns:
-        List of images at each master grid timestamp
-    """
-    resampled = []
-    for target_time in master_grid:
-        data = buffer.get_at_time(target_time)
-        resampled.append(data)
-    return resampled
-
-
-def compute_qvel_from_qpos(qpos_array: np.ndarray, dt: float) -> np.ndarray:
-    """
-    Compute joint velocities from position trajectory using finite differences.
-
-    Args:
-        qpos_array: Array of shape (num_timesteps, 11)
-        dt: Time step between consecutive positions
-
-    Returns:
-        Array of shape (num_timesteps, 11) with velocities
-    """
-    qvel_array = np.zeros_like(qpos_array)
-
-    # Forward difference for all but last
-    qvel_array[:-1] = (qpos_array[1:] - qpos_array[:-1]) / dt
-
-    # Use same as previous for last timestep
-    qvel_array[-1] = qvel_array[-2]
-
-    return qvel_array
 
 
 def collect_synchronized(
@@ -528,9 +559,10 @@ def collect_synchronized(
     logger.info("Synchronized Data Collection Server (ACT++ Format)")
     logger.info("="*70)
     logger.info(f"Master clock: {policy_hz} Hz (dt = {1.0/policy_hz:.4f}s)")
-    logger.info(f"Joint data: ~50 Hz → {policy_hz} Hz (interpolate + downsample)")
-    logger.info(f"ZED images: ~12 Hz → {policy_hz} Hz (nearest neighbor upsample)")
-    logger.info(f"Kiwi images: ~5 Hz → {policy_hz} Hz (nearest neighbor upsample)")
+    logger.info(f"Expected sources:")
+    logger.info(f"  Joint data: ~50 Hz → {policy_hz} Hz (interpolate + downsample)")
+    logger.info(f"  ZED images: ~12 Hz → {policy_hz} Hz (nearest neighbor upsample)")
+    logger.info(f"  Kiwi images: ~5 Hz → {policy_hz} Hz (nearest neighbor upsample)")
     logger.info(f"Collection duration: ~{duration_seconds}s")
     logger.info("")
 
@@ -543,18 +575,38 @@ def collect_synchronized(
     zed_thread.start()
     time.sleep(1.0)  # Let ZED initialize
 
-    # Start joint data server
-    joint_conn = start_joint_server(port=joint_port)
+    # Start server sockets (non-blocking setup)
+    joint_server = start_joint_server(port=joint_port)
+    kiwi_server = start_kiwi_server(port=kiwi_port)
+
+    # Wait for both clients to connect (with timeout)
+    logger.info("\nWaiting for both Mac and iPhone clients to connect...")
+    connection_timeout = 120.0  # Allow up to 2 minutes for both connections
+
+    joint_conn = wait_for_client_connection(joint_server, "Mac", timeout_seconds=connection_timeout)
+    if joint_conn is None:
+        logger.error("Failed to establish Mac connection - aborting data collection")
+        stop_event.set()
+        return
+
+    kiwi_conn = wait_for_client_connection(kiwi_server, "iPhone", timeout_seconds=connection_timeout)
+    if kiwi_conn is None:
+        logger.error("Failed to establish iPhone connection - aborting data collection")
+        stop_event.set()
+        joint_conn.close()
+        return
+
+    logger.info("✓ Both Mac and iPhone clients connected - starting data streams\n")
+
+    # Start joint data thread
     joint_thread = threading.Thread(
         target=stream_joint_data_worker,
         args=(joint_conn, joint_buffer, disconnect_event),
         daemon=True
     )
     joint_thread.start()
-    time.sleep(0.5)
 
-    # Start Kiwi data server
-    kiwi_conn = start_kiwi_server(port=kiwi_port)
+    # Start Kiwi data thread
     kiwi_thread = threading.Thread(
         target=stream_kiwi_data_worker,
         args=(kiwi_conn, kiwi_buffer, stop_event, disconnect_event),
@@ -597,16 +649,41 @@ def collect_synchronized(
 
     logger.info("\nAll streams stopped")
 
-    # Now resample to master grid
+    # Calculate actual FPS from collected data
     joint_data = joint_buffer.get_all()
+    zed_data = zed_buffer.get_all()
+    kiwi_data = kiwi_buffer.get_all()
+
     if len(joint_data) < 2:
         logger.error("Not enough joint data collected")
         return
 
+    # Compute actual frame rates
+    joint_times = [item.timestamp for item in joint_data]
+    joint_duration = joint_times[-1] - joint_times[0]
+    actual_joint_fps = len(joint_data) / joint_duration if joint_duration > 0 else 0
+
+    actual_zed_fps = 0
+    if len(zed_data) >= 2:
+        zed_times = [item.timestamp for item in zed_data]
+        zed_duration = zed_times[-1] - zed_times[0]
+        actual_zed_fps = len(zed_data) / zed_duration if zed_duration > 0 else 0
+
+    actual_kiwi_fps = 0
+    if len(kiwi_data) >= 2:
+        kiwi_times = [item.timestamp for item in kiwi_data]
+        kiwi_duration = kiwi_times[-1] - kiwi_times[0]
+        actual_kiwi_fps = len(kiwi_data) / kiwi_duration if kiwi_duration > 0 else 0
+
+    logger.info(f"\nActual Frame Rates:")
+    logger.info(f"  Joint data: {actual_joint_fps:.2f} Hz ({len(joint_data)} samples in {joint_duration:.2f}s)")
+    logger.info(f"  ZED images: {actual_zed_fps:.2f} Hz ({len(zed_data)} frames in {zed_times[-1] - zed_times[0]:.2f}s)" if len(zed_data) >= 2 else f"  ZED images: No valid data")
+    logger.info(f"  Kiwi images: {actual_kiwi_fps:.2f} Hz ({len(kiwi_data)} frames in {kiwi_times[-1] - kiwi_times[0]:.2f}s)" if len(kiwi_data) >= 2 else f"  Kiwi images: No valid data")
+    logger.info("")
+
     logger.info(f"Resampling data ({len(joint_data)} joint samples)...")
 
     # Get time range from joint data
-    joint_times = [item.timestamp for item in joint_data]
     grid_start = joint_times[0]
     grid_end = joint_times[-1]
 
@@ -614,15 +691,15 @@ def collect_synchronized(
     master_grid = create_master_time_grid(grid_start, grid_end, policy_hz)
     logger.info(f"Master grid: {len(master_grid)} timesteps ({grid_end - grid_start:.2f}s)")
 
-    # Resample all data to master grid
-    logger.info("  → Interpolating joint data...")
-    qpos_list = resample_joint_data(joint_buffer, master_grid)
+    # Resample all data to master grid with intelligent frequency detection
+    logger.info("  → Resampling joint data...")
+    qpos_list = intelligently_resample_data(joint_buffer, master_grid, data_type='continuous')
 
-    logger.info("  → Upsampling ZED images (nearest neighbor)...")
-    zed_list = resample_image_data(zed_buffer, master_grid)
+    logger.info("  → Resampling ZED images...")
+    zed_list = intelligently_resample_data(zed_buffer, master_grid, data_type='discrete')
 
-    logger.info("  → Upsampling Kiwi images (nearest neighbor)...")
-    kiwi_list = resample_image_data(kiwi_buffer, master_grid)
+    logger.info("  → Resampling Kiwi images...")
+    kiwi_list = intelligently_resample_data(kiwi_buffer, master_grid, data_type='discrete')
 
     # Handle missing data
     valid_indices = [i for i, qpos in enumerate(qpos_list) if qpos is not None]
@@ -672,10 +749,6 @@ def collect_synchronized(
             else:
                 kiwi_array[i] = img
 
-    # Compute qvel from qpos
-    logger.info("Computing velocities from positions...")
-    qvel_array = compute_qvel_from_qpos(qpos_array, dt)
-
     # Action = qpos for teleoperation
     action_array = qpos_array.copy()
 
@@ -694,7 +767,6 @@ def collect_synchronized(
         # Observations group
         obs = root.create_group('observations')
         obs.create_dataset('qpos', data=qpos_array, dtype='float64')
-        obs.create_dataset('qvel', data=qvel_array, dtype='float64')
 
         # Images group
         images = obs.create_group('images')
@@ -732,7 +804,6 @@ def collect_synchronized(
     logger.info(f"")
     logger.info(f"Data Shapes:")
     logger.info(f"  observations/qpos: {qpos_array.shape}")
-    logger.info(f"  observations/qvel: {qvel_array.shape}")
     logger.info(f"  observations/images/zed_camera: {zed_array.shape}")
     logger.info(f"  observations/images/arm_camera: {kiwi_array.shape}")
     logger.info(f"  action: {action_array.shape}")
