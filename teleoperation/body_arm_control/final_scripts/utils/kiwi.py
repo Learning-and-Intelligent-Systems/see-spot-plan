@@ -8,23 +8,17 @@ Uses Protocol Buffers for efficient binary serialization
 import socket
 import struct
 import numpy as np
-from io import BytesIO
 import os
 import time
 from pathlib import Path
 from queue import Queue
 from threading import Thread
+from io import BytesIO
 
 from datetime import datetime
 from frame_bundle_pb2 import FrameBundle
 
-# Try to use OpenCV for faster image decoding, fallback to PIL
-try:
-    import cv2
-    USE_OPENCV = True
-except ImportError:
-    from PIL import Image
-    USE_OPENCV = False
+from PIL import Image
 
 
 def start_kiwi_server(host: str = '0.0.0.0', port: int = 8888):
@@ -92,7 +86,6 @@ def stream_kiwi_frames(conn: socket.socket, use_rerun: bool = False, save_images
         save_queue = Queue(maxsize=10)  # Buffer up to 10 frames
         
         def save_worker():
-            from PIL import Image
             while True:
                 item = save_queue.get()
                 if item is None:  # Poison pill
@@ -219,21 +212,19 @@ def stream_kiwi_frames(conn: socket.socket, use_rerun: bool = False, save_images
             elapsed = (datetime.now() - start_time).total_seconds()
             fps = frame_count / elapsed if elapsed > 0 else 0
 
-            # Decode RGB image (use OpenCV if available for faster decoding)
+            # Decode RGB image using PIL (faster)
             if not rgb_data_manual:
                 continue
-            
-            if USE_OPENCV:
-                # OpenCV is typically 2-3x faster than PIL for JPEG decoding
-                # Use IMREAD_COLOR and decode directly to RGB (faster than BGR->RGB conversion)
-                rgb = cv2.imdecode(np.frombuffer(rgb_data_manual, dtype=np.uint8), cv2.IMREAD_COLOR)
-                if rgb is None:
-                    continue
-                # Only convert if we need RGB (OpenCV uses BGR by default)
-                # For maximum speed, we could skip this if downstream code accepts BGR
-                rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-            else:
-                rgb = np.array(Image.open(BytesIO(rgb_data_manual)))
+
+            try:
+                pil_image = Image.open(BytesIO(rgb_data_manual))
+                if pil_image.mode == 'RGBA':
+                    pil_image = pil_image.convert('RGB')
+                elif pil_image.mode != 'RGB':
+                    pil_image = pil_image.convert('RGB')
+                rgb = np.array(pil_image)
+            except Exception:
+                continue
 
             # Print frame info (reduced frequency)
             if print_interval > 0 and frame_count % print_interval == 0:
@@ -276,8 +267,6 @@ def stream_kiwi_frames(conn: socket.socket, use_rerun: bool = False, save_images
             print(f"Frames received: {frame_count}")
             print(f"Duration: {elapsed:.1f}s")
             print(f"Average FPS: {fps:.1f}")
-            if USE_OPENCV:
-                print(f"Using OpenCV for fast image decoding")
             print(f"\n👋 Receiver stopped")
         
         # Stop background save thread (with timeout to avoid blocking)

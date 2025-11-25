@@ -4,9 +4,13 @@ Spot data collection script for Mac (connects to robot, streams data to Nova GPU
 
 This script:
 1. Runs on Mac connected to Spot robot
-2. Collects joint, gripper, and body pose/velocity data
-3. Streams data to Nova GPU machine (zed_collection_server.py)
-4. Nova captures ZED images synchronized with the data
+2. Collects joint, gripper, and body pose/velocity data at ~50 Hz
+3. Streams data to Nova GPU machine (synchronized_data_collection.py)
+4. Nova synchronizes with ZED (~12 Hz) and Kiwi (~5 Hz) streams on a master grid
+
+Packet format sent to server:
+    [timestamp (8 bytes, double)] [num_values (4 bytes, int)] [value1 (8 bytes)] ... [valueN (8 bytes)]
+    Values: [6 arm joints] [1 gripper] [6 body pose] [3 body velocity] = 16 total
 
 Usage:
     python formatted_collect_body_arm_data_remote.py --hostname <spot-ip> --nova-host <nova-ip> --nova-port 9999
@@ -30,15 +34,25 @@ from spot_utils.utils import get_robot_state, verify_estop
 
 def send_data(sock, timestamp, joint_values):
     """
-    Send joint data packet to server.
+    Send joint data packet to synchronized_data_collection.py server.
 
-    Packet format:
-        [timestamp (8 bytes, double)] [num_values (4 bytes)] [value1 (8)] [value2 (8)] ...
+    Packet format (big-endian):
+        [timestamp (8 bytes, double)]
+        [num_values (4 bytes, uint32)]
+        [value1 (8 bytes, double)] ... [valueN (8 bytes, double)]
+
+    Example with 16 values:
+        timestamp | num_values | j0 | j1 | j2 | j3 | j4 | j5 | gripper | x | y | z | yaw | pitch | roll | vx | vy | v_rot
 
     Args:
-        sock: Connected socket
-        timestamp: Unix timestamp (float)
-        joint_values: List of values (16 total: 6 joints + 1 gripper + 6 body pose + 3 body vel)
+        sock: Connected socket to server
+        timestamp: Unix timestamp in seconds (float)
+        joint_values: List of 16 floats:
+            [0-5]: arm joint positions (radians)
+            [6]: gripper state (0-1 normalized)
+            [7-9]: body position (x, y, z in meters)
+            [10-12]: body orientation (yaw, pitch, roll in radians)
+            [13-15]: body velocity (vx, vy, v_angular_z)
     """
     timestamp_bytes = struct.pack('>d', timestamp)
     num_values = len(joint_values)
@@ -70,10 +84,22 @@ def collect_body_arm_data_remote(robot, nova_sock, rate_hz=100.0):
     """
     Collect body/arm data and stream to Nova.
 
+    Data collected per frame:
+    - 6 arm joint positions (radians)
+    - 1 gripper state (0-1 normalized, 0=closed, 1=open)
+    - 6 body pose values (x, y, z, yaw, pitch, roll)
+    - 3 body velocities (vx, vy, v_angular_z)
+    Total: 16 values per frame
+
+    Nova server (synchronized_data_collection.py) will:
+    - Downsample this ~50 Hz stream to 20 Hz via interpolation
+    - Synchronize with ZED (~12 Hz) and Kiwi (~5 Hz) streams
+    - Upsample images to match 20 Hz policy frequency
+
     Args:
         robot: Spot robot object
         nova_sock: Connected socket to Nova server
-        rate_hz: Collection rate in Hz
+        rate_hz: Collection rate in Hz (default 100 Hz, will be downsampled to policy Hz)
     """
     arm_joint_names = ["arm0.sh0", "arm0.sh1", "arm0.el0", "arm0.el1", "arm0.wr0", "arm0.wr1"]
     dt = 1.0 / rate_hz
