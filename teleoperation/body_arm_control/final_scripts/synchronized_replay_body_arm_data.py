@@ -240,9 +240,9 @@ def synchronized_replay_body_arm_data(robot, hdf5_filename, rate_hz=None):
 
 def main():
     # Configuration
-    ROBOT_HOSTNAME = "192.168.1.100"  # Set your robot's IP/hostname here
-    HDF5_FILE = "teleoperation_data/episode_20251125_165947.hdf5"  # Path to HDF5 file to replay
-    REPLAY_RATE_HZ = None  # None = use collection rate, or set to specific Hz (e.g., 20.0)
+    ROBOT_HOSTNAME = "192.168.80.3"  # Set your robot's IP/hostname here
+    HDF5_FILE = "teleoperation/body_arm_control/final_scripts/episode_20251125_165947 (2).hdf5"  # Path to HDF5 file to replay
+    REPLAY_RATE_HZ = 20.0  # None = use collection rate, or set to specific Hz (e.g., 20.0)
 
     parser = argparse.ArgumentParser(
         description='Replay synchronized teleoperation data collected from synchronized_data_collection.py'
