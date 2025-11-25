@@ -75,6 +75,8 @@ import logging
 import sys
 sys.path.insert(0, str(Path(__file__).parent / "utils"))
 from zed import stream_zed_frames
+from io import BytesIO
+from PIL import Image
 
 # Configure logging
 logging.basicConfig(
@@ -198,7 +200,7 @@ def start_kiwi_server(port: int = 8888) -> socket.socket:
     return conn
 
 
-def stream_joint_data_worker(conn: socket.socket, buffer: CircularTimestampBuffer):
+def stream_joint_data_worker(conn: socket.socket, buffer: CircularTimestampBuffer, disconnect_event: threading.Event):
     """
     Thread worker: Receive joint data from Mac and add to buffer.
 
@@ -209,7 +211,8 @@ def stream_joint_data_worker(conn: socket.socket, buffer: CircularTimestampBuffe
         while True:
             header = recv_exact(conn, 12)
             if header is None:
-                logger.info("Joint client disconnected")
+                logger.info("Joint client disconnected - stopping collection")
+                disconnect_event.set()
                 break
 
             timestamp = struct.unpack('>d', header[:8])[0]
@@ -217,7 +220,8 @@ def stream_joint_data_worker(conn: socket.socket, buffer: CircularTimestampBuffe
 
             values_data = recv_exact(conn, num_values * 8)
             if values_data is None:
-                logger.info("Joint client disconnected")
+                logger.info("Joint client disconnected - stopping collection")
+                disconnect_event.set()
                 break
 
             values = struct.unpack('>' + 'd' * num_values, values_data)
@@ -227,9 +231,11 @@ def stream_joint_data_worker(conn: socket.socket, buffer: CircularTimestampBuffe
             buffer.append(system_time, np.array(values, dtype=np.float64))
 
     except socket.timeout:
-        logger.warning("Joint server timeout")
+        logger.warning("Joint server timeout - stopping collection")
+        disconnect_event.set()
     except Exception as e:
         logger.error(f"Joint server error: {e}")
+        disconnect_event.set()
 
 
 def stream_zed_data_worker(buffer: CircularTimestampBuffer, stop_event: threading.Event):
@@ -253,45 +259,155 @@ def stream_zed_data_worker(buffer: CircularTimestampBuffer, stop_event: threadin
         logger.error(f"ZED streaming error: {e}")
 
 
-def stream_kiwi_data_worker(conn: socket.socket, buffer: CircularTimestampBuffer, stop_event: threading.Event):
+def stream_kiwi_data_worker(conn: socket.socket, buffer: CircularTimestampBuffer, stop_event: threading.Event, disconnect_event: threading.Event):
     """
     Thread worker: Receive Kiwi frames from iPhone at ~5 Hz and add to buffer.
 
-    Expects simple format: [frame_length (4 bytes)] [JPEG data]
+    Expects Protobuf format: [length (4 bytes)] [Protobuf FrameBundle data]
+    Extracts JPEG image data from the Protobuf message.
     """
     try:
         logger.info("Starting Kiwi frame reception (~5 Hz)...")
+        rgb_field_num = None  # Cache RGB field number after first frame
+        frame_count = 0
+
         while not stop_event.is_set():
-            # Read frame length
+            # Read length prefix (4 bytes, big-endian)
             length_data = recv_exact(conn, 4)
             if length_data is None:
-                logger.info("Kiwi client disconnected")
+                logger.info("Kiwi client disconnected - stopping collection")
+                disconnect_event.set()
                 break
 
             frame_length = struct.unpack('>I', length_data)[0]
 
-            # Read JPEG data
-            jpeg_data = recv_exact(conn, frame_length)
-            if jpeg_data is None:
-                logger.info("Kiwi client disconnected")
+            # Read Protobuf payload
+            protobuf_data = recv_exact(conn, frame_length)
+            if protobuf_data is None:
+                logger.info("Kiwi client disconnected - stopping collection")
+                disconnect_event.set()
                 break
 
-            # Decode JPEG to RGB
+            # Extract RGB image from Protobuf wire format
+            rgb_data_manual = None
+
+            # Find RGB field in the Protobuf message
+            if rgb_field_num is None:
+                # First frame: scan to find RGB field
+                i = 0
+                while i < len(protobuf_data):
+                    tag = protobuf_data[i]
+                    field_num = tag >> 3
+                    wire_type = tag & 0x7
+                    i += 1
+
+                    if wire_type == 0:  # varint
+                        while i < len(protobuf_data) and (protobuf_data[i] & 0x80):
+                            i += 1
+                        i += 1
+                    elif wire_type == 2:  # length-delimited
+                        length_field = 0
+                        shift = 0
+                        start_pos = i
+                        while i < len(protobuf_data):
+                            byte = protobuf_data[i]
+                            length_field |= (byte & 0x7F) << shift
+                            i += 1
+                            if not (byte & 0x80):
+                                break
+                            shift += 7
+
+                        # Look for JPEG/PNG data (large length-delimited field with image magic bytes)
+                        if length_field > 1000 and i + length_field <= len(protobuf_data):
+                            data = protobuf_data[i:i+length_field]
+                            if data[:2] == b'\xff\xd8' or data[:4] == b'\x89PNG':
+                                rgb_data_manual = data
+                                rgb_field_num = field_num
+                                logger.debug(f"Found RGB image in field {field_num} ({length_field} bytes)")
+                                break
+                        i += length_field
+                    elif wire_type == 5:  # 32-bit fixed
+                        i += 4
+                    elif wire_type == 1:  # 64-bit fixed
+                        i += 8
+                    else:
+                        break
+            else:
+                # Subsequent frames: directly extract from known field
+                i = 0
+                while i < len(protobuf_data):
+                    tag = protobuf_data[i]
+                    field_num = tag >> 3
+                    wire_type = tag & 0x7
+                    i += 1
+
+                    if field_num == rgb_field_num and wire_type == 2:  # length-delimited
+                        length_field = 0
+                        shift = 0
+                        while i < len(protobuf_data):
+                            byte = protobuf_data[i]
+                            length_field |= (byte & 0x7F) << shift
+                            i += 1
+                            if not (byte & 0x80):
+                                break
+                            shift += 7
+
+                        if i + length_field <= len(protobuf_data):
+                            rgb_data_manual = protobuf_data[i:i+length_field]
+                        break
+                    elif wire_type == 0:  # varint
+                        while i < len(protobuf_data) and (protobuf_data[i] & 0x80):
+                            i += 1
+                        i += 1
+                    elif wire_type == 2:  # length-delimited (skip)
+                        length_field = 0
+                        shift = 0
+                        while i < len(protobuf_data):
+                            byte = protobuf_data[i]
+                            length_field |= (byte & 0x7F) << shift
+                            i += 1
+                            if not (byte & 0x80):
+                                break
+                            shift += 7
+                        i += length_field
+                    elif wire_type == 5:  # 32-bit fixed
+                        i += 4
+                    elif wire_type == 1:  # 64-bit fixed
+                        i += 8
+                    else:
+                        break
+
+            # Decode image if found
+            if not rgb_data_manual:
+                continue
+
             try:
-                nparr = np.frombuffer(jpeg_data, np.uint8)
-                rgb = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if rgb is not None:
-                    rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-                    system_time = time.time()
-                    buffer.append(system_time, rgb)
+                # Decode JPEG/PNG using PIL
+                pil_image = Image.open(BytesIO(rgb_data_manual))
+                if pil_image.mode == 'RGBA':
+                    pil_image = pil_image.convert('RGB')
+                elif pil_image.mode != 'RGB':
+                    pil_image = pil_image.convert('RGB')
+                rgb = np.array(pil_image)
+
+                # Add to buffer with system time
+                system_time = time.time()
+                buffer.append(system_time, rgb)
+
+                frame_count += 1
+                if frame_count % 10 == 0:
+                    logger.debug(f"Received {frame_count} Kiwi frames")
+
             except Exception as e:
                 logger.warning(f"Failed to decode Kiwi frame: {e}")
                 continue
 
     except socket.timeout:
-        logger.warning("Kiwi server timeout")
+        logger.warning("Kiwi server timeout - stopping collection")
+        disconnect_event.set()
     except Exception as e:
         logger.error(f"Kiwi streaming error: {e}")
+        disconnect_event.set()
 
 
 def create_master_time_grid(
@@ -406,6 +522,7 @@ def collect_synchronized(
 
     # Threading events
     stop_event = threading.Event()
+    disconnect_event = threading.Event()  # Signals when any client disconnects
 
     logger.info("="*70)
     logger.info("Synchronized Data Collection Server (ACT++ Format)")
@@ -430,7 +547,7 @@ def collect_synchronized(
     joint_conn = start_joint_server(port=joint_port)
     joint_thread = threading.Thread(
         target=stream_joint_data_worker,
-        args=(joint_conn, joint_buffer),
+        args=(joint_conn, joint_buffer, disconnect_event),
         daemon=True
     )
     joint_thread.start()
@@ -440,7 +557,7 @@ def collect_synchronized(
     kiwi_conn = start_kiwi_server(port=kiwi_port)
     kiwi_thread = threading.Thread(
         target=stream_kiwi_data_worker,
-        args=(kiwi_conn, kiwi_buffer, stop_event),
+        args=(kiwi_conn, kiwi_buffer, stop_event, disconnect_event),
         daemon=True
     )
     kiwi_thread.start()
@@ -452,6 +569,11 @@ def collect_synchronized(
 
     try:
         while time.time() - start_time < duration_seconds:
+            # Check if any client disconnected
+            if disconnect_event.is_set():
+                logger.info("\nClient disconnection detected - stopping collection")
+                break
+
             # Check if we have data from all sources
             joint_count = len(joint_buffer.buffer)
             zed_count = len(zed_buffer.buffer)
@@ -509,6 +631,15 @@ def collect_synchronized(
         return
 
     logger.info(f"Valid timesteps: {len(valid_indices)} / {len(qpos_list)} ({100*len(valid_indices)/len(qpos_list):.1f}%)")
+
+    # Check data availability
+    valid_zed = [i for i, img in enumerate(zed_list) if img is not None]
+    valid_kiwi = [i for i, img in enumerate(kiwi_list) if img is not None]
+    logger.info(f"Valid ZED frames: {len(valid_zed)} / {len(zed_list)} ({100*len(valid_zed)/len(zed_list):.1f}%)")
+    logger.info(f"Valid Kiwi frames: {len(valid_kiwi)} / {len(kiwi_list)} ({100*len(valid_kiwi)/len(kiwi_list):.1f}%)")
+
+    if len(valid_kiwi) == 0:
+        logger.warning("WARNING: No valid Kiwi frames received! Check iPhone client connection.")
 
     # Create contiguous arrays
     dt = 1.0 / policy_hz
