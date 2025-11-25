@@ -8,11 +8,23 @@ Uses Protocol Buffers for efficient binary serialization
 import socket
 import struct
 import numpy as np
-from PIL import Image
 from io import BytesIO
+import os
+import time
+from pathlib import Path
+from queue import Queue
+from threading import Thread
 
 from datetime import datetime
 from frame_bundle_pb2 import FrameBundle
+
+# Try to use OpenCV for faster image decoding, fallback to PIL
+try:
+    import cv2
+    USE_OPENCV = True
+except ImportError:
+    from PIL import Image
+    USE_OPENCV = False
 
 
 def start_kiwi_server(host: str = '0.0.0.0', port: int = 8888):
@@ -39,33 +51,64 @@ def start_kiwi_server(host: str = '0.0.0.0', port: int = 8888):
     print(f"⏳ Waiting for connection...\n")
 
     conn, addr = server_sock.accept()
+    
+    # Optimize socket for high throughput
+    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # Disable Nagle's algorithm
+    conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)  # 4MB receive buffer
+    
     print(f"📱 Connected from {addr[0]}:{addr[1]}\n")
 
     return conn, addr
 
 
-def stream_kiwi_frames(conn: socket.socket, use_rerun: bool = False):
+def stream_kiwi_frames(conn: socket.socket, use_rerun: bool = False, save_images: bool = False, save_dir: str = None, print_interval: int = 30):
     """
-    Generator that yields RGB and depth frames from Kiwi iPhone app.
+    Generator that yields RGB frames from Kiwi iPhone app.
 
     Args:
         conn: Connected socket from start_kiwi_server()
         use_rerun: Whether to log frames to Rerun (default: False)
+        save_images: Whether to save RGB images to disk (default: False)
+        save_dir: Directory to save images (default: ./kiwi_frames)
+        print_interval: Print stats every N frames (default: 30, set to 0 to disable)
 
     Yields:
-        Tuple with frame data:
-            - rgb: HxWx3 uint8 RGB image (from JPEG)
-            - depth: HxW float32 depth in meters (or None if not available)
-            - transform: 4x4 camera pose matrix
-            - intrinsics: 3x3 camera intrinsics matrix
-            - frame_number: Frame counter from iPhone
+        rgb: HxWx3 uint8 RGB image (from JPEG)
     """
     if use_rerun:
         import rerun as rr
         rr.init("kiwi_stream", spawn=True)
 
+    # Background thread for saving images (non-blocking)
+    save_queue = None
+    save_thread = None
+    if save_images:
+        if save_dir is None:
+            save_dir = "./kiwi_frames"
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        print(f"💾 Saving images to: {save_path.absolute()}")
+        
+        save_queue = Queue(maxsize=10)  # Buffer up to 10 frames
+        
+        def save_worker():
+            from PIL import Image
+            while True:
+                item = save_queue.get()
+                if item is None:  # Poison pill
+                    break
+                rgb_data, frame_num = item
+                # Save JPEG directly without decoding (much faster)
+                with open(save_path / f"frame_{frame_num:06d}.jpg", 'wb') as f:
+                    f.write(rgb_data)
+                save_queue.task_done()
+        
+        save_thread = Thread(target=save_worker, daemon=True)
+        save_thread.start()
+
     frame_count = 0
     start_time = datetime.now()
+    rgb_field_num = None  # Cache the RGB field number after first frame
 
     try:
         while True:
@@ -83,124 +126,173 @@ def stream_kiwi_frames(conn: socket.socket, use_rerun: bool = False):
                 print("\n🔌 Connection closed by client")
                 break
 
-            # Decode Protobuf
-            frame = FrameBundle()
-            frame.ParseFromString(protobuf_data)
-
-            # Debug: Log all fields in the frame
-            print(f"\nDEBUG: Frame fields:")
-            print(f"  - frame_number: {frame.frame_number}")
-            print(f"  - image_width: {frame.image_width}")
-            print(f"  - image_height: {frame.image_height}")
-            print(f"  - rgb_image_data: {len(frame.rgb_image_data)} bytes")
-            print(f"  - depth_width: {frame.depth_width}")
-            print(f"  - depth_height: {frame.depth_height}")
-            print(f"  - depth_data: {len(frame.depth_data)} bytes")
-            print(f"  - transform: {len(frame.transform)} floats")
-            print(f"  - intrinsics: {len(frame.intrinsics)} floats")
+            # Extract RGB from wire format (skip full protobuf parse for speed)
+            rgb_data_manual = None
+            
+            # Extract RGB from wire format (optimized: only parse if field number not cached)
+            if rgb_field_num is None:
+                # First frame: find RGB field
+                i = 0
+                while i < len(protobuf_data):
+                    tag = protobuf_data[i]
+                    field_num = tag >> 3
+                    wire_type = tag & 0x7
+                    i += 1
+                    
+                    if wire_type == 0:  # varint
+                        while i < len(protobuf_data) and (protobuf_data[i] & 0x80):
+                            i += 1
+                        i += 1
+                    elif wire_type == 2:  # length-delimited
+                        length_field = 0
+                        shift = 0
+                        start_pos = i
+                        while i < len(protobuf_data):
+                            byte = protobuf_data[i]
+                            length_field |= (byte & 0x7F) << shift
+                            i += 1
+                            if not (byte & 0x80):
+                                break
+                            shift += 7
+                        
+                        if length_field > 1000 and i + length_field <= len(protobuf_data):
+                            data = protobuf_data[i:i+length_field]
+                            if data[:2] == b'\xff\xd8' or data[:4] == b'\x89PNG':
+                                rgb_data_manual = data
+                                rgb_field_num = field_num
+                                print(f"✅ Found RGB image in field {field_num} ({length_field} bytes)")
+                                break
+                        i += length_field
+                    elif wire_type == 5:  # 32bit float
+                        i += 4
+                    elif wire_type == 1:  # 64bit fixed
+                        i += 8
+                    else:
+                        break
+            else:
+                # Subsequent frames: directly extract from known field
+                i = 0
+                while i < len(protobuf_data):
+                    tag = protobuf_data[i]
+                    field_num = tag >> 3
+                    wire_type = tag & 0x7
+                    i += 1
+                    
+                    if field_num == rgb_field_num and wire_type == 2:  # length-delimited
+                        length_field = 0
+                        shift = 0
+                        while i < len(protobuf_data):
+                            byte = protobuf_data[i]
+                            length_field |= (byte & 0x7F) << shift
+                            i += 1
+                            if not (byte & 0x80):
+                                break
+                            shift += 7
+                        
+                        if i + length_field <= len(protobuf_data):
+                            rgb_data_manual = protobuf_data[i:i+length_field]
+                        break
+                    elif wire_type == 0:  # varint
+                        while i < len(protobuf_data) and (protobuf_data[i] & 0x80):
+                            i += 1
+                        i += 1
+                    elif wire_type == 2:  # length-delimited (skip)
+                        length_field = 0
+                        shift = 0
+                        while i < len(protobuf_data):
+                            byte = protobuf_data[i]
+                            length_field |= (byte & 0x7F) << shift
+                            i += 1
+                            if not (byte & 0x80):
+                                break
+                            shift += 7
+                        i += length_field
+                    elif wire_type == 5:  # 32bit float
+                        i += 4
+                    elif wire_type == 1:  # 64bit fixed
+                        i += 8
+                    else:
+                        break
 
             # Update stats
             frame_count += 1
             elapsed = (datetime.now() - start_time).total_seconds()
             fps = frame_count / elapsed if elapsed > 0 else 0
 
-            # Decode RGB image from JPEG
-            rgb_data = frame.rgb_image_data
+            # Decode RGB image (use OpenCV if available for faster decoding)
+            if not rgb_data_manual:
+                continue
+            
+            if USE_OPENCV:
+                # OpenCV is typically 2-3x faster than PIL for JPEG decoding
+                # Use IMREAD_COLOR and decode directly to RGB (faster than BGR->RGB conversion)
+                rgb = cv2.imdecode(np.frombuffer(rgb_data_manual, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if rgb is None:
+                    continue
+                # Only convert if we need RGB (OpenCV uses BGR by default)
+                # For maximum speed, we could skip this if downstream code accepts BGR
+                rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+            else:
+                rgb = np.array(Image.open(BytesIO(rgb_data_manual)))
 
-            if rgb_data:
+            # Print frame info (reduced frequency)
+            if print_interval > 0 and frame_count % print_interval == 0:
+                total_size = len(length_data) + len(protobuf_data)
+                print(f"📦 Frame {frame_count:5d} | "
+                      f"Image: {rgb.shape[1]:4d}x{rgb.shape[0]:4d} | "
+                      f"Size: {total_size:6d}B | "
+                      f"FPS: {fps:4.1f}")
+
+            # Save RGB image if requested (non-blocking via background thread)
+            # Put raw JPEG data instead of decoded image to avoid expensive copy
+            if save_images and save_queue:
                 try:
-                    rgb_image = Image.open(BytesIO(rgb_data))
-                    rgb = np.array(rgb_image)
-                except Exception as e:
-                    print(f"⚠️ Failed to decode image: {e}")
-                    rgb = None
-            else:
-                # RGB data not available from iPhone app
-                rgb = None
+                    save_queue.put_nowait((rgb_data_manual, frame_count))
+                except:
+                    pass  # Queue full, skip saving this frame
 
-            # Decode depth data if available
-            depth = None
-            if frame.depth_data and frame.depth_width > 0 and frame.depth_height > 0:
-                depth_data = frame.depth_data
-                depth_width = frame.depth_width
-                depth_height = frame.depth_height
-                expected_size = depth_width * depth_height * 4
-                actual_size = len(depth_data)
-                if actual_size == expected_size:
-                    depth = np.frombuffer(depth_data, dtype=np.float32)
-                    depth = depth.reshape((depth_height, depth_width))
-                elif actual_size % 4 == 0:
-                    print(f"⚠️  Depth data size mismatch: expected {expected_size} bytes ({depth_width}x{depth_height}), got {actual_size} bytes")
-                    num_elements = actual_size // 4
-                    if num_elements >= depth_width * depth_height:
-                        depth = np.frombuffer(depth_data, dtype=np.float32)[:depth_width * depth_height]
-                        depth = depth.reshape((depth_height, depth_width))
-                    else:
-                        print(f"⚠️  Depth data too small: need {depth_width * depth_height} floats, got {num_elements}")
-                        depth = None
-                else:
-                    print(f"⚠️  Depth data size not multiple of 4: got {actual_size} bytes")
-                    depth = None
-
-            # Extract camera pose
-            if len(frame.transform) >= 16:
-                transform = np.array(frame.transform[:16], dtype=np.float32).reshape(4, 4).T
-            else:
-                transform = np.eye(4, dtype=np.float32)
-
-            # Extract camera intrinsics
-            if len(frame.intrinsics) >= 9:
-                intrinsics = np.array(frame.intrinsics[:9], dtype=np.float32).reshape(3, 3)
-            else:
-                intrinsics = np.eye(3, dtype=np.float32)
-
-            # Print frame info
-            rgb_status = '✅' if rgb is not None else '❌'
-            depth_status = '✅' if frame.depth_data else '❌'
-            total_size = len(length_data) + len(protobuf_data)
-            print(f"📦 Frame {frame.frame_number:5d} | "
-                  f"RGB: {rgb_status} | "
-                  f"Depth: {depth_status} {frame.depth_width:4d}x{frame.depth_height:4d} | "
-                  f"Size: {total_size:6d}B | "
-                  f"FPS: {fps:4.1f}")
-
-            # Log to Rerun if enabled
+            # Log to Rerun if enabled (do this last as it can be slow)
             if use_rerun:
-                rr.set_time_sequence("frame", frame_count)
-                if rgb is not None:
-                    rr.log("world/camera/rgb", rr.Image(rgb))
-                if depth is not None:
-                    rr.log("world/camera/depth", rr.DepthImage(depth, meter=1000.0))
+                rr.set_time("frame", sequence=frame_count)
+                rr.log("world/camera/rgb", rr.Image(rgb))
 
-                rotation = transform[:3, :3]
-                translation = transform[:3, 3]
-                rr.log("world/camera", rr.Transform3D(
-                    mat3x3=rotation,
-                    translation=translation
-                ))
-                rr.log("world/camera", rr.Pinhole(
-                    image_from_camera=intrinsics,
-                    width=frame.image_width,
-                    height=frame.image_height
-                ))
-
-            yield rgb, depth, transform, intrinsics, frame.frame_number
+            yield rgb
 
     except KeyboardInterrupt:
-        print(f"\n\n{'=' * 60}")
-        print(f"📊 Session Stats")
-        print(f"{'=' * 60}")
-        print(f"Frames received: {frame_count}")
-        print(f"Duration: {elapsed:.1f}s")
-        print(f"Average FPS: {fps:.1f}")
-        print(f"\n👋 Receiver stopped")
+        pass  # Will print stats below
 
     except Exception as e:
         print(f"\n❌ Error: {e}")
         raise
 
+    finally:
+        # Always report stats at the end (print first, before cleanup)
+        if frame_count > 0:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            fps = frame_count / elapsed if elapsed > 0 else 0
+            print(f"\n\n{'=' * 60}")
+            print(f"📊 Session Stats")
+            print(f"{'=' * 60}")
+            print(f"Frames received: {frame_count}")
+            print(f"Duration: {elapsed:.1f}s")
+            print(f"Average FPS: {fps:.1f}")
+            if USE_OPENCV:
+                print(f"Using OpenCV for fast image decoding")
+            print(f"\n👋 Receiver stopped")
+        
+        # Stop background save thread (with timeout to avoid blocking)
+        if save_queue:
+            try:
+                save_queue.put_nowait(None)  # Poison pill
+            except:
+                pass  # Queue full, thread will exit when it processes current items
+            # Wait for remaining saves with timeout (don't block indefinitely)
+            start_wait = time.time()
+            while save_queue.unfinished_tasks > 0 and (time.time() - start_wait) < 2.0:
+                time.sleep(0.1)
 
-def main(host: str = '0.0.0.0', port: int = 8888, use_rerun: bool = True):
+
+def main(host: str = '0.0.0.0', port: int = 8888, use_rerun: bool = False, save_images: bool = False, save_dir: str = None, print_interval: int = 30):
     """
     Run Kiwi receiver in standalone mode (for testing).
 
@@ -208,12 +300,14 @@ def main(host: str = '0.0.0.0', port: int = 8888, use_rerun: bool = True):
         host: Host to listen on
         port: Port to listen on
         use_rerun: Whether to visualize in Rerun
+        save_images: Whether to save RGB images to disk
+        save_dir: Directory to save images (default: ./kiwi_frames)
+        print_interval: Print stats every N frames (default: 30, set to 0 to disable)
     """
     conn, addr = start_kiwi_server(host, port)
-    server_sock = None
 
     try:
-        for rgb, depth, transform, intrinsics, frame_number in stream_kiwi_frames(conn, use_rerun=use_rerun):
+        for rgb in stream_kiwi_frames(conn, use_rerun=use_rerun, save_images=save_images, save_dir=save_dir, print_interval=print_interval):
             pass  # Data is automatically processed by the generator
     finally:
         conn.close()
@@ -244,4 +338,4 @@ def get_local_ip():
 
 
 if __name__ == "__main__":
-    main()
+    main(save_images=True, save_dir='./kiwi_frames')

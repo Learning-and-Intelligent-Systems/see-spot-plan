@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+message FrameBundle {
+  int32 frame_number = 1;
+  bytes rgb_image_data = 2;
+  bytes depth_data = 3;
+  int32 depth_width = 4;
+  int32 depth_height = 5;
+  int32 image_width = 6;
+  int32 image_height = 7;
+  repeated float transform = 8;  // 4x4 transform matrix (16 values)
+  repeated float intrinsics = 9;  // 3x3 camera intrinsics (9 values)
+}
+
