@@ -22,11 +22,13 @@ from skills.spot_hand_move import (
     close_gripper,
     move_hand_to_relative_pose,
     open_gripper,
+    stow_arm,
 )
 from skills.wipe import wipe_multiple_strokes
 from skills.wipe_online import wipe_online as run_wipe_online
 from skills.push_button import push_button as run_push_button
 from skills.spot_navigation import navigate_to_absolute_pose
+from spot_utils.gemini_utils import get_pixel_from_gemini
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
 from spot_utils.utils import (
@@ -35,6 +37,9 @@ from spot_utils.utils import (
     get_pixel_from_user,
     verify_estop,
 )
+import rerun as rr
+from PIL import Image
+import cv2
 
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
     x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
@@ -114,20 +119,43 @@ def grasp(text_prompt: Optional[str]) -> None:
     """Grasp an object at a specified pixel."""
     # Capture an image.
     camera = "hand_color_image"
-    if ROBOT is not None and LOCALIZER is not None:
-        rgbd = capture_images(ROBOT, LOCALIZER, [camera])[camera]
+    assert ROBOT is not None, "Sahit why!"
+    assert LOCALIZER is not None, "SAHIT WHY!!!!"
 
-        if text_prompt and SAM_ENDPOINT:
-            # Select a pixel by querying GroundedSAM.
-            pixel = get_pixel_from_grounded_sam(rgbd.rgb, text_prompt, SAM_ENDPOINT)
-        else:
-            # Select a pixel by querying the user.
-            pixel = get_pixel_from_user(rgbd.rgb)
+    images = capture_images(ROBOT, LOCALIZER, [camera])
+    rgbd = images[camera]
+    rgb_np = rgbd.rgb
+    rr.log("rgb_raw", rr.Image(rgb_np))
 
-        if pixel is not None:
-            # Grasp at the pixel with a top-down grasp.
-            top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
-            grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+    # FIXME: Don't do this!!! Hiding implementation
+    # if text_prompt and SAM_ENDPOINT:
+    #     # Select a pixel by querying GroundedSAM.
+    #     pixel = get_pixel_from_grounded_sam(rgbd.rgb, text_prompt, SAM_ENDPOINT)
+    # else:
+    #     # Select a pixel by querying the user.
+    #     pixel = get_pixel_from_user(rgbd.rgb)
+
+    # Call Gemini to point
+    vlm_query_template = f"""
+    Point to the {text_prompt}. If you cannot see the {text_prompt} fully, point to the best guess.
+    The answer should follow the json format: [{{"point": , "label": }}, ...]. The points are in [y, x] format normalized to 0-1000.
+    """
+    image_pil = Image.fromarray(rgb_np)
+    pixel = get_pixel_from_gemini(vlm_query_template, image_pil)
+
+    # Draw pixel on the image
+    bgr = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR)
+    cv2.circle(bgr, pixel, 5, (0, 0, 255), -1)
+    rgb_annotated = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    rr.log("pointing", rr.Image(rgb_annotated))
+
+    if pixel is not None:
+        # Grasp at the pixel with a top-down grasp.
+        top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
+        grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+        return
+    else:
+        raise RuntimeError("WTF. Grasp failed!")
 
 
 def grasp_at_pose(X_RobEE: NDArray) -> None:
