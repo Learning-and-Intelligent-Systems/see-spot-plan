@@ -547,9 +547,11 @@ def collect_synchronized(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create circular buffers for each data stream
-    joint_buffer = CircularTimestampBuffer(max_size=2000)  # ~40s at 50 Hz
-    zed_buffer = CircularTimestampBuffer(max_size=500)    # ~40s at 12 Hz
-    kiwi_buffer = CircularTimestampBuffer(max_size=500)   # ~100s at 5 Hz
+    # Buffer sizes calculated to hold entire collection at expected source frequencies
+    # Add 50% margin for safety and initial startup frames
+    joint_buffer = CircularTimestampBuffer(max_size=int(50 * duration_seconds * 1.5))  # ~50 Hz
+    zed_buffer = CircularTimestampBuffer(max_size=int(30 * duration_seconds * 1.5))    # ~30 Hz
+    kiwi_buffer = CircularTimestampBuffer(max_size=int(5 * duration_seconds * 1.5))    # ~5 Hz
 
     # Threading events
     stop_event = threading.Event()
