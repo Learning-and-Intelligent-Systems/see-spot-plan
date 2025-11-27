@@ -18,7 +18,7 @@ from pathlib import Path
 import sys
 
 # ===== CONFIGURATION =====
-HDF5_FILE = "/home/kelly_lucy/Downloads/see-spot-plan/teleoperation_data/episode_20251125_151951.hdf5"
+HDF5_FILE = "/home/kelly_lucy/Downloads/see-spot-plan/teleoperation_data/episode_20251125_212002.hdf5"
 # Change this to visualize different files
 # ======================
 
@@ -34,7 +34,6 @@ class HDF5Viewer:
 
         # Load data
         self.qpos = self.file['observations']['qpos'][:]
-        self.qvel = self.file['observations']['qvel'][:]
         self.zed_images = self.file['observations']['images']['zed_camera']
         self.arm_images = self.file['observations']['images']['arm_camera']
 
