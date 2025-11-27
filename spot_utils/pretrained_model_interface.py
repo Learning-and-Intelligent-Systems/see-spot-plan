@@ -258,6 +258,7 @@ class GoogleGeminiModel():
         model names."""
         self._model_name = model_name
         assert "GOOGLE_API_KEY" in os.environ
+        print(f'Using Gemini API key: {os.getenv("GOOGLE_API_KEY")}')
         genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
         self._model = genai.GenerativeModel(self._model_name)  # pylint:disable=no-member
 
@@ -355,11 +356,18 @@ class GoogleGeminiVLM(VisionLanguageModel, GoogleGeminiModel):
         generation_config = genai.types.GenerationConfig(  # pylint:disable=no-member
             candidate_count=num_completions,
             temperature=temperature)
-        response = self._model.generate_content(
-            [prompt] + imgs,  # type: ignore
-            generation_config=generation_config)  # type: ignore
-        # import pdb; pdb.set_trace()
-        response.resolve()  # type: ignore
+        logging.debug(f"GoogleGeminiVLM._sample_completions with config: {generation_config}")
+
+        try:
+            response = self._model.generate_content(
+                [prompt] + imgs,  # type: ignore
+                generation_config=generation_config,  # type: ignore
+            )
+            response.resolve()  # type: ignore
+        except Exception as exc:  # pylint:disable=broad-except
+            logging.error("Gemini VLM generate_content failed", exc_info=True)
+            raise RuntimeError(f"Gemini VLM generate_content failed: {exc}") from exc
+
         return [response.text]
 
     def get_id(self) -> str:

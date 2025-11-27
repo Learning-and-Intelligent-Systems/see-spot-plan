@@ -15,7 +15,7 @@ import requests
 
 
 # Base URL for the exec_plan_api FastAPI server
-SPOT_PLAN_API_BASE_URL = os.getenv("SPOT_PLAN_API_BASE_URL", "http://0.0.0.0:8000")
+SPOT_PLAN_API_BASE_URL = os.getenv("SPOT_PLAN_API_BASE_URL", "http://0.0.0.0:8001")
 
 SPOT_PLAN_HEALTH_URL = f"{SPOT_PLAN_API_BASE_URL}/health"
 SPOT_PLAN_INIT_URL = f"{SPOT_PLAN_API_BASE_URL}/init"
