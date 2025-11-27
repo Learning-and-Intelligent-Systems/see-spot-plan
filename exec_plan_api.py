@@ -128,7 +128,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run the Spot Plan Execution API server.")
     parser.add_argument("--host", type=str, default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8001)
     args = parser.parse_args()
 
     uvicorn.run("exec_plan_api:app", host=args.host, port=args.port, reload=False)
