@@ -8,6 +8,7 @@ plan provided as input.
 """
 
 import argparse
+import json
 from typing import Dict, Optional
 
 import numpy as np
@@ -28,7 +29,7 @@ from skills.wipe import wipe_multiple_strokes
 from skills.wipe_online import wipe_online as run_wipe_online
 from skills.push_button import push_button as run_push_button
 from skills.spot_navigation import navigate_to_absolute_pose
-from spot_utils.gemini_utils import get_pixel_from_gemini
+from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
 from spot_utils.utils import (
@@ -60,6 +61,71 @@ LOCALIZER = None
 ROBOT = None
 SAM_ENDPOINT = None
 SPOT_ROOM_POSE: Dict[str, float] = dict()
+
+
+def _get_pixel_from_gemini(vlm_query_str: str, pil_image: Image.Image) -> tuple[int, int]:
+    """Query Gemini VLM to get a single pixel [y, x] normalized to 0-1000, then
+    denormalize to image pixel coordinates.
+
+    This mirrors the usage pattern in the wipe tool: construct a
+    GoogleGeminiVLM instance and call sample_completions directly.
+    """
+
+    vlm = GoogleGeminiVLM("gemini-2.5-pro")
+
+    def _strip_markdown_fence(json_output_str: str) -> str:
+        """Remove ```json fences if present and return the inner JSON string."""
+        lines = json_output_str.splitlines()
+        for i, line in enumerate(lines):
+            if line.strip() == "```json":
+                json_output_str = "\n".join(lines[i + 1 :])
+                json_output_str = json_output_str.split("```")[0]
+                break
+        return json_output_str.strip()
+
+    # 1) Query the VLM
+    vlm_output_list = vlm.sample_completions(
+        prompt=vlm_query_str,
+        imgs=[pil_image],
+        temperature=0.0,
+        seed=42,
+        num_completions=1,
+    )
+    vlm_output_str = vlm_output_list[0]
+
+    # 2) Parse JSON output
+    json_string_to_parse = _strip_markdown_fence(vlm_output_str)
+    parsed_data = json.loads(json_string_to_parse)
+
+    if not isinstance(parsed_data, list) or not parsed_data:
+        raise ValueError("Parsed JSON is not a non-empty list.")
+
+    first_point_obj = parsed_data[0]
+    if (
+        "point" not in first_point_obj
+        or not isinstance(first_point_obj["point"], list)
+        or len(first_point_obj["point"]) != 2
+    ):
+        raise ValueError(
+            "First element in JSON does not contain a valid 'point' list [y, x]."
+        )
+
+    y_norm, x_norm = first_point_obj["point"]
+    if not isinstance(y_norm, (int, float)) or not isinstance(x_norm, (int, float)):
+        raise ValueError("Normalized coordinates are not numbers.")
+
+    # 3) Denormalize from 0–1000 range to image pixel coordinates
+    img_height = pil_image.height
+    img_width = pil_image.width
+    y = int(y_norm * img_height / 1000.0)
+    x = int(x_norm * img_width / 1000.0)
+
+    # Clamp to image bounds
+    y = max(0, min(y, img_height - 1))
+    x = max(0, min(x, img_width - 1))
+
+    # Return as (x, y) pixel coordinate
+    return (x, y)
 
 
 def np_pose_to_SE3(X_RobEE: NDArray) -> math_helpers.SE3Pose:
@@ -141,7 +207,7 @@ def grasp(text_prompt: Optional[str]) -> None:
     The answer should follow the json format: [{{"point": , "label": }}, ...]. The points are in [y, x] format normalized to 0-1000.
     """
     image_pil = Image.fromarray(rgb_np)
-    pixel = get_pixel_from_gemini(vlm_query_template, image_pil)
+    pixel = _get_pixel_from_gemini(vlm_query_template, image_pil)
 
     # Draw pixel on the image
     bgr = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR)
@@ -253,6 +319,7 @@ if __name__ == "__main__":
         else:
             print("spot-room-pose not found in metadata.yaml, using default val")
             SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "angle": 0.0}
+            
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
     print("done")
