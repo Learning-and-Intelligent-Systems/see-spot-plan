@@ -13,8 +13,11 @@ import numpy as np
 from bosdyn.api import arm_command_pb2, robot_command_pb2, synchronized_command_pb2
 from bosdyn.client.lease import LeaseClient
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
+from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.client.frame_helpers import get_odom_tform_body
 from bosdyn.geometry import EulerZXY
 from google.protobuf import wrappers_pb2
+from google.protobuf.timestamp_pb2 import Timestamp
 
 """
 Example use: 
@@ -22,6 +25,11 @@ Example use:
 """
 
 app = Flask(__name__)
+
+# Global variables for robot and localizer (set in main)
+robot = None
+localizer = None
+initial_body_z = None  # Store initial body z for height offset calculation
 
 @app.route("/get_location", methods=["GET"])
 def api_get_location():
@@ -200,37 +208,64 @@ def api_get_qpos():
     {
         "status": "ok",
         "qpos": [arm_j0, arm_j1, arm_j2, arm_j3, arm_j4, arm_j5, gripper_frac,
-                  body_x, body_y, body_z, body_pitch]
+                  body_x, body_y, body_z_offset, body_pitch]
     }
+    
+    Note: body_z is height offset (relative to initial standing height), not absolute z position.
     """
     try:
         # Get robot state
-        robot_state_client = robot.ensure_client("robot_state")
+        robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
         state = robot_state_client.get_robot_state()
 
-        # Extract arm joint positions (first 6 values)
-        arm_joints = [float(state.kinematic_state.joint_states[i].position.value) for i in range(6)]
+        arm_joint_names = ["arm0.sh0", "arm0.sh1", "arm0.el0", "arm0.el1", "arm0.wr0", "arm0.wr1"]
+        joint_states = state.kinematic_state.joint_states
+        joint_dict = {js.name: js for js in joint_states}
+        
+        arm_joints = []
+        for joint_name in arm_joint_names:
+                arm_joints.append(float(joint_dict[joint_name].position.value))
 
         # Extract gripper open fraction (normalize percentage to 0.0-1.0)
         gripper_fraction = state.manipulator_state.gripper_open_percentage / 100.0
+        gripper_fraction = max(0.0, min(1.0, gripper_fraction))
 
-        # Extract body position and pitch
-        body_frame_state = state.kinematic_state.transforms_snapshot.child_to_parent_edge_map.get("body")
-        body_x = body_frame_state.parent_tform_child.position.x
-        body_y = body_frame_state.parent_tform_child.position.y
-        body_z = body_frame_state.parent_tform_child.position.z
-        body_pitch = body_frame_state.parent_tform_child.rotation.to_yaw()
 
-        # Assemble qpos array
-        qpos = arm_joints + [gripper_fraction, body_x, body_y, body_z, body_pitch]
+        # Extract body position and pitch using proper frame helpers
+        odom_tform_body = get_odom_tform_body(state.kinematic_state.transforms_snapshot)
+        body_pos = odom_tform_body.position
+        body_rot = odom_tform_body.rotation
+
+        body_x = body_pos.x
+        body_y = body_pos.y
+        body_z_absolute = body_pos.z
+
+        # Calculate height offset relative to initial body z
+        global initial_body_z
+        if initial_body_z is None:
+            initial_body_z = body_z_absolute
+        body_z_offset = body_z_absolute - initial_body_z
+
+        # Extract pitch from quaternion rotation
+        w, x, y, z = body_rot.w, body_rot.x, body_rot.y, body_rot.z
+        body_pitch = np.arcsin(2*(w*y - z*x))
+
+        # Assemble qpos array (body_z is now height offset, not absolute position)
+        qpos = arm_joints + [gripper_fraction, body_x, body_y, body_z_offset, body_pitch]
 
         return jsonify({"status": "ok", "qpos": qpos})
 
     except Exception as e:
         import traceback
-        print("ERROR:", e)
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)}), 500
+        error_msg = str(e)
+        error_traceback = traceback.format_exc()
+        print(f"ERROR in /get_qpos: {error_msg}")
+        print(error_traceback)
+        return jsonify({
+            "status": "error", 
+            "message": error_msg,
+            "error_type": type(e).__name__
+        }), 500
 
 
 @app.route("/execute_action", methods=["POST"])
@@ -255,9 +290,11 @@ def api_execute_action():
         return jsonify({"error": "action must be an array of 11 elements"}), 400
 
     try:
+        if robot is None:
+            return jsonify({"status": "error", "message": "Robot not initialized"}), 500
+        
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
-        lease_client = robot.ensure_client(LeaseClient.default_service_name)
-        lease_client.take()
+        # Don't take lease - localizer already has one from init()
 
         # Extract action components
         arm_q = action[0:6]  # First 6: arm joint targets
@@ -278,57 +315,61 @@ def api_execute_action():
         arm_command = None
         mobility_command = None
 
-        # Build arm command - only send if arm position changed significantly
-        # For single timestep, we always build and send arm command
-        trajectory_time = 0.05  # 50ms for 20 Hz
-        point = RobotCommandBuilder.create_arm_joint_trajectory_point(
-            arm_q[0], arm_q[1], arm_q[2],
-            arm_q[3], arm_q[4], arm_q[5],
-            time_since_reference_secs=trajectory_time,
-        )
-
-        max_vel = wrappers_pb2.DoubleValue(value=15.0)
-        max_acc = wrappers_pb2.DoubleValue(value=30.0)
-
-        arm_joint_traj = arm_command_pb2.ArmJointTrajectory(
-            points=[point],
-            maximum_velocity=max_vel,
-            maximum_acceleration=max_acc,
-        )
-
-        joint_move_command = arm_command_pb2.ArmJointMoveCommand.Request(
-            trajectory=arm_joint_traj
-        )
-        arm_command = arm_command_pb2.ArmCommand.Request(
-            arm_joint_move_command=joint_move_command
-        )
-
         # Determine if walking or standing with arm movement
         if velocity_magnitude > velocity_threshold:
-            # WALKING: send velocity command
+            # WALKING: send velocity command only (skip arm to avoid timing conflicts)
             max_velocity = 1.5
             final_v_x = max(-max_velocity, min(max_velocity, body_vel_x))
             final_v_y = max(-max_velocity, min(max_velocity, body_vel_y))
             final_v_rot = 0.0
 
+            # Swap v_x and v_y to match standard convention:
+            # v_x should be forward/back, v_y should be left/right
             velocity_cmd = RobotCommandBuilder.synchro_velocity_command(
-                v_x=final_v_x,
-                v_y=final_v_y,
+                v_x=final_v_y,  # Swap: use body_vel_y for forward/back
+                v_y=final_v_x,  # Swap: use body_vel_x for left/right
                 v_rot=final_v_rot
             )
             mobility_command = velocity_cmd.synchronized_command.mobility_command
 
-            # Send arm + gripper + velocity
+            # Send gripper + velocity only (no arm command when walking to avoid timing conflicts)
             sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
-                arm_command=arm_command,
                 gripper_command=gripper_command,
                 mobility_command=mobility_command
             )
         else:
-            # STANDING: check if height adjustment is needed
-            if body_z is not None and abs(body_z) > 0.001:  # 1mm threshold
-                # Send height adjustment with arm movement
-                final_height_offset = max(-0.1, min(0.1, body_z))
+            # STANDING: build arm command and check if height or pitch adjustment is needed
+            # At 20 Hz, each command executes for 50ms (0.05s)
+            # Use larger buffer to account for network latency and prevent ExpiredError
+            trajectory_time = 0.2  # 200ms (50ms execution + 150ms buffer for network latency)
+            point = RobotCommandBuilder.create_arm_joint_trajectory_point(
+                arm_q[0], arm_q[1], arm_q[2],
+                arm_q[3], arm_q[4], arm_q[5],
+                time_since_reference_secs=trajectory_time,
+            )
+
+            max_vel = wrappers_pb2.DoubleValue(value=15.0)
+            max_acc = wrappers_pb2.DoubleValue(value=30.0)
+
+            arm_joint_traj = arm_command_pb2.ArmJointTrajectory(
+                points=[point],
+                maximum_velocity=max_vel,
+                maximum_acceleration=max_acc,
+            )
+
+            joint_move_command = arm_command_pb2.ArmJointMoveCommand.Request(
+                trajectory=arm_joint_traj
+            )
+            arm_command = arm_command_pb2.ArmCommand.Request(
+                arm_joint_move_command=joint_move_command
+            )
+            
+            height_needed = body_z is not None and abs(body_z) > 0.001  # 1mm threshold
+            pitch_needed = abs(body_pitch) > 0.001  # 1mm threshold in radians
+            
+            if height_needed or pitch_needed:
+                # Send height/pitch adjustment with arm movement
+                final_height_offset = max(-0.1, min(0.1, body_z)) if height_needed else 0.0
 
                 footprint_R_body = EulerZXY(yaw=0.0, roll=0.0, pitch=body_pitch)
                 stand_cmd = RobotCommandBuilder.synchro_stand_command(
@@ -343,7 +384,7 @@ def api_execute_action():
                     mobility_command=mobility_command
                 )
             else:
-                # ARM ONLY: no walking, no height adjustment
+                # ARM ONLY: no walking, no height adjustment, no pitch change
                 sync_command = synchronized_command_pb2.SynchronizedCommand.Request(
                     arm_command=arm_command,
                     gripper_command=gripper_command
@@ -351,15 +392,32 @@ def api_execute_action():
 
         # Send the synchronized command
         robot_command = robot_command_pb2.RobotCommand(synchronized_command=sync_command)
-        command_client.robot_command(robot_command)
+        
+        # Set end_time_secs to prevent ExpiredError
+        # At 20 Hz, each command should execute for 50ms, but add buffer for network latency
+        # For velocity commands, set a longer duration to avoid expiration
+        if velocity_magnitude > velocity_threshold:
+            # Walking: velocity commands need longer duration to avoid expiration
+            end_time_secs = time.time() + 0.5  # 500ms buffer for network latency
+        else:
+            # Standing: arm commands have trajectory_time, so shorter duration is fine
+            end_time_secs = time.time() + 0.3  # 300ms buffer for network latency
+        
+        command_client.robot_command(robot_command, end_time_secs=end_time_secs)
 
         return jsonify({"status": "ok"})
 
     except Exception as e:
         import traceback
-        print("ERROR:", e)
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)}), 500
+        error_msg = str(e)
+        error_traceback = traceback.format_exc()
+        print(f"ERROR in /execute_action: {error_msg}")
+        print(error_traceback)
+        return jsonify({
+            "status": "error", 
+            "message": error_msg,
+            "error_type": type(e).__name__
+        }), 500
 
 
 @app.route("/reset_robot", methods=["POST"])
@@ -368,9 +426,11 @@ def api_reset_robot():
     Reset robot to safe position (stow arm, stand).
     """
     try:
-        from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
-
+        if robot is None:
+            return jsonify({"status": "error", "message": "Robot not initialized"}), 500
+        
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
+        # Don't take lease - localizer already has one from init()
 
         # Build stow command
         stow_cmd = RobotCommandBuilder.arm_stow_command()
@@ -434,7 +494,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Initialize Spot connection
+    # Initialize Spot connection (module-level variables)
     robot, localizer, sam_endpoint = init(args.hostname, args.map_name, args.sam_endpoint)
 
     # Start Flask server
