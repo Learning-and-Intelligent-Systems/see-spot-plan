@@ -34,7 +34,7 @@ class TestGetQpos:
         resp = requests.get(f"{BASE_URL}/get_qpos")
         data = resp.json()
         assert len(data["qpos"]) == 11
-        # 0-5: arm joints, 6: gripper, 7-8: body x,y (absolute), 9: body_z (height offset), 10: body pitch
+        # 0-5: arm joints, 6: gripper, 7: body_z (absolute), 8-9: body_vel_x/y, 10: body pitch
 
     def test_get_qpos_array_values_are_floats(self):
         """Test /get_qpos array contains numeric values"""
@@ -54,11 +54,11 @@ class TestGetQpos:
             assert -4 < qpos[i] < 4, f"Arm joint {i} out of range: {qpos[i]}"
         # Gripper fraction (6) should be [0, 1]
         assert 0 <= qpos[6] <= 1, f"Gripper fraction out of range: {qpos[6]}"
-        # Body position (7-8: x, y) are absolute positions in odom frame
-        assert -100 < qpos[7] < 100, f"Body x out of range: {qpos[7]}"
-        assert -100 < qpos[8] < 100, f"Body y out of range: {qpos[8]}"
-        # Body height (9) is now height offset (relative to initial standing height), should be small
-        assert -0.5 < qpos[9] < 0.5, f"Body height offset out of range: {qpos[9]}"
+        # Body Z (7) is absolute position in odom frame, should be around -5.85
+        assert -10 < qpos[7] < 0, f"Body z out of range: {qpos[7]}"
+        # Body velocities (8-9) should be small when stationary
+        assert -2 < qpos[8] < 2, f"Body velocity x out of range: {qpos[8]}"
+        assert -2 < qpos[9] < 2, f"Body velocity y out of range: {qpos[9]}"
         # Body pitch (10) should be in reasonable range [-pi/2, pi/2]
         assert -2 < qpos[10] < 2, f"Body pitch out of range: {qpos[10]}"
 
@@ -76,9 +76,10 @@ class TestExecuteAction:
         """Test POST /execute_action with arm-only movement (no walking, no height change)"""
         # Get current robot state to use valid joint values
         current_qpos = self.get_current_qpos()
-        
-        # Use current arm/gripper positions, no body movement
-        action = current_qpos[:7] + [0.0, 0.0, 0.0, 0.0]  # Use current arm/gripper, no body movement
+
+        # Use current arm/gripper positions, keep same body_z, no velocity, current pitch
+        # Format: [6 arm + gripper + body_z + vel_x + vel_y + pitch]
+        action = current_qpos[:7] + [current_qpos[7], 0.0, 0.0, current_qpos[10]]
         resp = requests.post(f"{BASE_URL}/execute_action", json={"action": action})
         if resp.status_code != 200:
             print(f"Error response: {resp.text}")
@@ -90,7 +91,8 @@ class TestExecuteAction:
     def test_execute_action_success_with_height(self):
         """Test POST /execute_action with arm movement and height adjustment"""
         current_qpos = self.get_current_qpos()
-        action = current_qpos[:7] + [current_qpos[9] - 0.08, 0.0, 0.0, 0.1]
+        # Raise body by 0.05m (increase body_z)
+        action = current_qpos[:7] + [current_qpos[7] + 0.05, 0.0, 0.0, current_qpos[10]]
         resp = requests.post(f"{BASE_URL}/execute_action", json={"action": action})
         assert resp.status_code == 200
         data = resp.json()
@@ -99,7 +101,8 @@ class TestExecuteAction:
     def test_execute_action_success_with_walking(self):
         """Test POST /execute_action with walking (high velocity)"""
         current_qpos = self.get_current_qpos()
-        action = current_qpos[:7] + [0.0, 0.0, 0.8, 0.0]  # body_vel_x=0.5, body_vel_y=0.3 (magnitude > 0.03 threshold)
+        # Send velocity command: body_vel_x=0.0, body_vel_y=0.8 (magnitude > 0.03 threshold)
+        action = current_qpos[:7] + [current_qpos[7], 0.0, 0.8, current_qpos[10]]
         resp = requests.post(f"{BASE_URL}/execute_action", json={"action": action})
         if resp.status_code != 200:
             print(f"Error response: {resp.text}")
@@ -151,14 +154,14 @@ class TestExecuteAction:
     def test_execute_action_zero_gripper_open(self):
         """Test POST /execute_action with gripper fully closed"""
         current_qpos = self.get_current_qpos()
-        action = current_qpos[:6] + [0.0] + [0.0, 0.0, 0.0, 0.0]  # Gripper fully closed
+        action = current_qpos[:6] + [0.0] + [current_qpos[7], 0.0, 0.0, current_qpos[10]]
         resp = requests.post(f"{BASE_URL}/execute_action", json={"action": action})
         assert resp.status_code == 200
 
     def test_execute_action_full_gripper_open(self):
         """Test POST /execute_action with gripper fully open"""
         current_qpos = self.get_current_qpos()
-        action = current_qpos[:6] + [1.0] + [0.0, 0.0, 0.0, 0.0]  # Gripper fully open
+        action = current_qpos[:6] + [1.0] + [current_qpos[7], 0.0, 0.0, current_qpos[10]]
         resp = requests.post(f"{BASE_URL}/execute_action", json={"action": action})
         assert resp.status_code == 200
 
@@ -208,7 +211,8 @@ class TestAPIIntegration:
         current_qpos = qpos_resp.json()["qpos"]
 
         # Execute action using current state as reference
-        action = current_qpos[:7] + [0.0, 0.0, 0.0, 0.0]  # Use current arm/gripper, no body movement
+        # Format: [6 arm + gripper + body_z + vel_x + vel_y + pitch]
+        action = current_qpos[:7] + [current_qpos[7], 0.0, 0.0, current_qpos[10]]
         exec_resp = requests.post(f"{BASE_URL}/execute_action", json={"action": action})
         assert exec_resp.status_code == 200
 

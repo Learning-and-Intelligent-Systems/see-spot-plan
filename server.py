@@ -29,7 +29,7 @@ app = Flask(__name__)
 # Global variables for robot and localizer (set in main)
 robot = None
 localizer = None
-initial_body_z = None  # Store initial body z for height offset calculation
+nominal_height = -5.850433805135551  # Nominal standing height for body z offset calculation
 
 @app.route("/get_location", methods=["GET"])
 def api_get_location():
@@ -202,16 +202,18 @@ def api_look_into_container():
 @app.route("/get_qpos", methods=["GET"])
 def api_get_qpos():
     """
-    Get current robot state (arm joints, gripper, body position/pitch).
+    Get current robot state (arm joints, gripper, body height, velocity, pitch).
 
     Returns:
     {
         "status": "ok",
         "qpos": [arm_j0, arm_j1, arm_j2, arm_j3, arm_j4, arm_j5, gripper_frac,
-                  body_x, body_y, body_z_offset, body_pitch]
+                  body_z, body_velocity_x, body_velocity_y, body_pitch]
     }
-    
-    Note: body_z is height offset (relative to initial standing height), not absolute z position.
+
+    Note: body_z is absolute z position in odom frame.
+    For height offset in commands, subtract nominal_height (-5.850433805135551).
+    Velocities are in body frame (v_x forward/back, v_y left/right).
     """
     try:
         # Get robot state
@@ -221,7 +223,7 @@ def api_get_qpos():
         arm_joint_names = ["arm0.sh0", "arm0.sh1", "arm0.el0", "arm0.el1", "arm0.wr0", "arm0.wr1"]
         joint_states = state.kinematic_state.joint_states
         joint_dict = {js.name: js for js in joint_states}
-        
+
         arm_joints = []
         for joint_name in arm_joint_names:
                 arm_joints.append(float(joint_dict[joint_name].position.value))
@@ -230,28 +232,39 @@ def api_get_qpos():
         gripper_fraction = state.manipulator_state.gripper_open_percentage / 100.0
         gripper_fraction = max(0.0, min(1.0, gripper_fraction))
 
-
         # Extract body position and pitch using proper frame helpers
         odom_tform_body = get_odom_tform_body(state.kinematic_state.transforms_snapshot)
         body_pos = odom_tform_body.position
         body_rot = odom_tform_body.rotation
 
-        body_x = body_pos.x
-        body_y = body_pos.y
-        body_z_absolute = body_pos.z
+        body_z = body_pos.z
 
-        # Calculate height offset relative to initial body z
-        global initial_body_z
-        if initial_body_z is None:
-            initial_body_z = body_z_absolute
-        body_z_offset = body_z_absolute - initial_body_z
-
-        # Extract pitch from quaternion rotation
+        # Extract Euler angles from quaternion
         w, x, y, z = body_rot.w, body_rot.x, body_rot.y, body_rot.z
+        body_yaw = np.arctan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
         body_pitch = np.arcsin(2*(w*y - z*x))
 
-        # Assemble qpos array (body_z is now height offset, not absolute position)
-        qpos = arm_joints + [gripper_fraction, body_x, body_y, body_z_offset, body_pitch]
+        # Extract body velocity in odom frame
+        v_x = 0.0
+        v_y = 0.0
+        try:
+            if hasattr(state.kinematic_state, 'velocity_of_body_in_odom'):
+                vel = state.kinematic_state.velocity_of_body_in_odom
+                if vel is not None:
+                    if hasattr(vel, 'linear') and vel.linear is not None:
+                        v_x = vel.linear.x if hasattr(vel.linear, 'x') else 0.0
+                        v_y = vel.linear.y if hasattr(vel.linear, 'y') else 0.0
+        except (AttributeError, KeyError, TypeError):
+            pass
+
+        # Transform velocity from odom frame to body frame
+        cos_yaw = np.cos(body_yaw)
+        sin_yaw = np.sin(body_yaw)
+        v_x_body = v_x * cos_yaw + v_y * sin_yaw
+        v_y_body = -v_x * sin_yaw + v_y * cos_yaw
+
+        # Assemble qpos array: [6 arm joints + gripper + body_z + body_vel_x + body_vel_y + pitch]
+        qpos = arm_joints + [gripper_fraction, body_z, v_x_body, v_y_body, body_pitch]
 
         return jsonify({"status": "ok", "qpos": qpos})
 
@@ -262,7 +275,7 @@ def api_get_qpos():
         print(f"ERROR in /get_qpos: {error_msg}")
         print(error_traceback)
         return jsonify({
-            "status": "error", 
+            "status": "error",
             "message": error_msg,
             "error_type": type(e).__name__
         }), 500
@@ -278,6 +291,9 @@ def api_execute_action():
         "action": [arm_j0, arm_j1, arm_j2, arm_j3, arm_j4, arm_j5, gripper_frac,
                     body_z, body_vel_x, body_vel_y, body_pitch]
     }
+
+    Note: body_z is absolute z position (same format as /get_qpos).
+    It is converted to height offset internally for movement commands.
 
     Logic:
     - If body velocity magnitude > 0.03 m/s: send velocity command (walking)
@@ -299,10 +315,14 @@ def api_execute_action():
         # Extract action components
         arm_q = action[0:6]  # First 6: arm joint targets
         gripper_fraction = action[6]  # Element 6: gripper open fraction
-        body_z = action[7]  # Element 7: body height offset
+        body_z_absolute = action[7]  # Element 7: body z (absolute position in odom frame)
         body_vel_x = action[8]  # Element 8: body velocity x
         body_vel_y = action[9]  # Element 9: body velocity y
         body_pitch = action[10]  # Element 10: body pitch
+
+        # Convert absolute body_z to height offset relative to nominal standing height
+        global nominal_height
+        body_z_offset = body_z_absolute - nominal_height
 
         # Build gripper command
         gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(gripper_fraction)
@@ -364,12 +384,12 @@ def api_execute_action():
                 arm_joint_move_command=joint_move_command
             )
             
-            height_needed = body_z is not None and abs(body_z) > 0.001  # 1mm threshold
+            height_needed = body_z_offset is not None and abs(body_z_offset) > 0.001  # 1mm threshold
             pitch_needed = abs(body_pitch) > 0.001  # 1mm threshold in radians
-            
+
             if height_needed or pitch_needed:
                 # Send height/pitch adjustment with arm movement
-                final_height_offset = max(-0.1, min(0.1, body_z)) if height_needed else 0.0
+                final_height_offset = max(-0.1, min(0.1, body_z_offset)) if height_needed else 0.0
 
                 footprint_R_body = EulerZXY(yaw=0.0, roll=0.0, pitch=body_pitch)
                 stand_cmd = RobotCommandBuilder.synchro_stand_command(
