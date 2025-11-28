@@ -343,11 +343,11 @@ def api_execute_action():
             final_v_y = max(-max_velocity, min(max_velocity, body_vel_y))
             final_v_rot = 0.0
 
-            # Swap v_x and v_y to match standard convention:
-            # v_x should be forward/back, v_y should be left/right
+            # Use velocities directly: v_x_body is forward/back, v_y_body is left/right
+            # This matches the convention used in data collection (collect_body_arm_data_remote.py)
             velocity_cmd = RobotCommandBuilder.synchro_velocity_command(
-                v_x=final_v_y,  # Swap: use body_vel_y for forward/back
-                v_y=final_v_x,  # Swap: use body_vel_x for left/right
+                v_x=final_v_x,  # body_vel_x = forward/backward in body frame
+                v_y=final_v_y,  # body_vel_y = left/right in body frame
                 v_rot=final_v_rot
             )
             mobility_command = velocity_cmd.synchronized_command.mobility_command
