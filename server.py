@@ -361,15 +361,15 @@ def api_execute_action():
             # STANDING: build arm command and check if height or pitch adjustment is needed
             # At 20 Hz, each command executes for 50ms (0.05s)
             # Use larger buffer to account for network latency and prevent ExpiredError
-            trajectory_time = 0.2  # 200ms (50ms execution + 150ms buffer for network latency)
+            trajectory_time = 0.5  # 200ms (50ms execution + 150ms buffer for network latency)
             point = RobotCommandBuilder.create_arm_joint_trajectory_point(
                 arm_q[0], arm_q[1], arm_q[2],
                 arm_q[3], arm_q[4], arm_q[5],
                 time_since_reference_secs=trajectory_time,
             )
 
-            max_vel = wrappers_pb2.DoubleValue(value=15.0)
-            max_acc = wrappers_pb2.DoubleValue(value=30.0)
+            max_vel = wrappers_pb2.DoubleValue(value=2.0)
+            max_acc = wrappers_pb2.DoubleValue(value=4.0)
 
             arm_joint_traj = arm_command_pb2.ArmJointTrajectory(
                 points=[point],
