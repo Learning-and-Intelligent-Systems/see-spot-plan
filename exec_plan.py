@@ -132,17 +132,28 @@ def place_at_pose(X_RobEE: NDArray) -> None:
     """Place an object at a specified xyz position with a top-down approach.
 
     The first three entries of X_RobEE are interpreted as (x, y, z) in the
-    robot body frame. The orientation is set to a fixed top-down pose so
-    that the arm motion is simple and predictable, independent of any
-    orientation passed in.
+    robot body frame. Any additional entries (e.g. quaternion components) are
+    ignored for placement. A fixed positional offset of (0, 0, 0.05) meters in
+    the body frame is applied so the hand stops slightly above the nominal
+    target position. The orientation is set to a fixed top-down pose so that
+    the arm motion is simple and predictable, independent of any orientation
+    passed in.
     """
     assert ROBOT is not None
-    # Interpret the input as an xyz position in the body frame. Any additional
-    # entries (e.g. orientation) are ignored for placement.
+    # Interpret the input as an xyz position in the body frame.
     x, y, z = X_RobEE[0], X_RobEE[1], X_RobEE[2]
+    # Fixed positional offset (dx, dy, dz) expressed in the body frame.
+    dx, dy, dz = 0.0, 0.0, 0.05
     # Use the same "straight down" orientation used elsewhere for looking down.
     top_down_rot = DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE.rot
-    place_pose = math_helpers.SE3Pose(x=x, y=y, z=z, rot=top_down_rot)
+    # Apply the offset directly in the body frame so that positive dz moves
+    # the hand upward relative to the robot body.
+    place_pose = math_helpers.SE3Pose(
+        x=x + dx,
+        y=y + dy,
+        z=z + dz,
+        rot=top_down_rot,
+    )
     # Move to the placement pose, open the gripper to release, then the plan
     # can decide when to stow the arm.
     move_hand_to_relative_pose(ROBOT, place_pose)
