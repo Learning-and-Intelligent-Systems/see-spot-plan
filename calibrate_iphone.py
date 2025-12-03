@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import cv2
+import open3d as o3d
 import numpy as np
 from bosdyn.api import image_pb2
 from bosdyn.client import create_standard_sdk, math_helpers
@@ -44,6 +45,68 @@ from spot_utils.perception.spot_cameras import _image_response_to_image
 from spot_utils.utils import verify_estop
 
 from iphone_kiwi_receiver import KiwiReceiver
+
+
+def rgbd_to_point_cloud(
+    rgb: np.ndarray,
+    depth: np.ndarray,
+    intrinsics: np.ndarray,
+    depth_scale: float = 1000.0,
+    max_depth: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert an RGBD image and intrinsics into a point cloud in the camera frame.
+
+    Args:
+        rgb: HxWx3 uint8 array, assumed RGB.
+        depth: HxW (or HxWx1) array, uint16 in depth_scale units or float32 meters.
+        intrinsics: 3x3 matrix or array-like [fx, fy, cx, cy].
+        depth_scale: Scale factor from uint16 depth units to meters (default: 1000).
+        max_depth: Optional maximum depth in meters for filtering points.
+
+    Returns:
+        points: Nx3 float32 array of 3D points in the camera frame.
+        colors: Nx3 float32 array of RGB colors in [0, 1].
+    """
+    if depth.ndim == 3:
+        depth = depth[:, :, 0]
+
+    if depth.dtype == np.uint16 or depth.dtype == np.int32:
+        depth_m = depth.astype(np.float32) / float(depth_scale)
+    else:
+        depth_m = depth.astype(np.float32)
+
+    H, W = depth_m.shape
+    if rgb.shape[:2] != (H, W):
+        rgb = cv2.resize(rgb, (W, H), interpolation=cv2.INTER_NEAREST)
+
+    K = np.asarray(intrinsics, dtype=np.float32)
+    if K.shape == (3, 3):
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+    elif K.size == 4:
+        fx, fy, cx, cy = K.ravel().tolist()
+    else:
+        raise ValueError(f"Intrinsics must be 3x3 or length-4, got shape {K.shape}")
+
+    u_coords, v_coords = np.meshgrid(
+        np.arange(W, dtype=np.float32),
+        np.arange(H, dtype=np.float32),
+    )
+
+    z = depth_m
+    valid = z > 0
+    if max_depth is not None:
+        valid &= z <= float(max_depth)
+
+    x = (u_coords - cx) / fx * z
+    y = (v_coords - cy) / fy * z
+
+    points = np.stack((x, y, z), axis=-1)[valid]
+
+    rgb_float = rgb.astype(np.float32) / 255.0
+    colors = rgb_float.reshape(-1, 3)[valid.ravel()]
+
+    return points.astype(np.float32), colors.astype(np.float32)
 
 
 @dataclass
@@ -128,6 +191,7 @@ def _capture_spot_hand_frame(
 
     rgb_path = sample_dir / "spot_rgb.png"
     depth_path = sample_dir / "spot_depth.png"
+    intrinsics_path = sample_dir / "spot_intrinsics.json"
 
     # Save images to disk (depth is not used but we keep the path for symmetry)
     cv2.imwrite(str(rgb_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
@@ -144,6 +208,19 @@ def _capture_spot_hand_frame(
         ],
         dtype=np.float64,
     )
+
+    # Save intrinsics alongside the images for later use (e.g., point-cloud generation).
+    H, W = rgb.shape[:2]
+    with open(intrinsics_path, "w") as f:
+        json.dump(
+            {
+                "K": K.tolist(),
+                "width": int(W),
+                "height": int(H),
+            },
+            f,
+            indent=2,
+        )
 
     # BODY -> hand camera using transforms snapshot attached to the image.
     T_body_hand = get_a_tform_b(
@@ -623,6 +700,22 @@ def main() -> None:
         output_extrinsics_path = Path(args.output_extrinsics)
         run_calibration(samples_json_path, output_extrinsics_path)
 
+def get_point_cloud(dirpath: str, visualize: bool = False):
+    rgb_path = os.path.join(dirpath, "iphone_rgb.png")
+    depth_path = os.path.join(dirpath, "iphone_depth.npy")
+    intrinsics_path = os.path.join(dirpath, "iphone_intrinsics.json")
+    K = np.array(json.load(open(intrinsics_path))["K"], dtype=np.float64)
+    rgb = cv2.imread(rgb_path)
+    depth = np.load(depth_path)
+    points, colors = rgbd_to_point_cloud(rgb, depth, K)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+    if visualize:
+        o3d.visualization.draw_geometries([pcd])
+
+    return pcd
+
 """
 Example usage: 
 First collect data: 
@@ -634,5 +727,3 @@ python calibrate_iphone.py solve --samples_json /home/ubuntu/calib_data/samples.
 
 if __name__ == "__main__":
     main()
-
-
