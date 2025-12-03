@@ -17,7 +17,6 @@ from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.util import authenticate
 from numpy.typing import NDArray
 
-from skills.grasp import grasp_at_pixel
 from skills.grasp_vlm import grasp_with_vlm
 from skills.spot_hand_move import (
     close_gripper,
@@ -110,6 +109,11 @@ def gaze(direction: str) -> None:
     look_pose = direction_to_pose[direction]
     move_hand_to_relative_pose(ROBOT, look_pose)
     open_gripper(ROBOT)
+
+def gaze_without_open(direction: str) -> None:
+    """ Move the hand to look in a certain direction without opening the gripper."""
+    look_pose = direction_to_pose[direction]
+    move_hand_to_relative_pose(ROBOT, look_pose)
 
 
 def grasp(text_prompt: Optional[str]) -> None:
