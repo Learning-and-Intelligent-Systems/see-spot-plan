@@ -699,11 +699,24 @@ def wipe_online(
     # Capture an RGBD frame from the iPhone
     receiver = KiwiReceiver()
     frame = receiver.recv_frame()
-    rgb_img = frame.rgb  # HxWx3 RGB
-    depth_img = frame.depth
+    rgb_img = frame.rgb  # HxWx3 RGB (full resolution)
+    depth_img = frame.depth  # HxW float32 (typically lower resolution)
     if depth_img is None:
         raise RuntimeError("iPhone depth image is missing; cannot compute 3D points.")
-    K_iphone = np.asarray(frame.intrinsics, dtype=np.float32)
+    K_full = np.asarray(frame.intrinsics, dtype=np.float32)  # intrinsics at RGB resolution
+
+    # Depth and RGB have different resolutions; compute scale factors and
+    # scale intrinsics so they are valid for the depth resolution.
+    H_rgb, W_rgb = rgb_img.shape[:2]
+    H_d, W_d = depth_img.shape[:2]
+    scale_x = W_d / float(W_rgb)
+    scale_y = H_d / float(H_rgb)
+
+    K_iphone = K_full.copy()
+    K_iphone[0, 0] *= scale_x  # fx
+    K_iphone[1, 1] *= scale_y  # fy
+    K_iphone[0, 2] *= scale_x  # cx
+    K_iphone[1, 2] *= scale_y  # cy
 
     save_folderpath = "wipe_online_images_iphone"
     os.makedirs(save_folderpath, exist_ok=True)
@@ -713,8 +726,22 @@ def wipe_online(
     rgb_pil = Image.fromarray(rgb_img)
     rgb_image_path = os.path.join(save_folderpath, f"rgb_{timestamp}.png")
     depth_image_path = os.path.join(save_folderpath, f"depth_{timestamp}.npy")
+    intrinsics_path = os.path.join(save_folderpath, f"intrinsics_{timestamp}.json")
     rgb_pil.save(rgb_image_path)
     np.save(depth_image_path, depth_img.astype(np.float32))
+    # Save intrinsics for this iPhone frame
+    H, W = rgb_img.shape[:2]
+    with open(intrinsics_path, "w") as f:
+        json.dump(
+            {
+                "K_rgb": K_full.tolist(),
+                "K_depth": K_iphone.tolist(),
+                "width": int(W),
+                "height": int(H),
+            },
+            f,
+            indent=2,
+        )
 
     # Point cloud in iPhone camera frame
     points, colors = rgbd_to_point_cloud(rgb_img, depth_img, K_iphone)
@@ -747,14 +774,30 @@ def wipe_online(
 
     if vlm_query_template is None:
         vlm_query_template = DEFAULT_WIPE_VLM_QUERY_TEMPLATE
-    # vlm_query_template = "I have an image with some text written on it, and I am interested in finding a bounding box for it. Can you give me the coordinates of the bounding box that encloses the written text?"
-    bbox = get_bbox_from_gemini(vlm_query_template, rgb_pil)
-    print(f"The coordinates of the bounding box are: {bbox}")
+    # Run VLM on the full-resolution RGB image and get bbox in RGB pixel coordinates.
+    bbox_rgb = get_bbox_from_gemini(vlm_query_template, rgb_pil)
+    print(f"The coordinates of the bounding box (RGB space) are: {bbox_rgb}")
+
+    # Scale bbox from RGB resolution (H_rgb,W_rgb) to depth resolution (H_d,W_d)
+    ymin_r, xmin_r, ymax_r, xmax_r = bbox_rgb
+    ymin_d = int(round(ymin_r * scale_y))
+    ymax_d = int(round(ymax_r * scale_y))
+    xmin_d = int(round(xmin_r * scale_x))
+    xmax_d = int(round(xmax_r * scale_x))
+
+    # Clamp to depth image bounds
+    ymin_d = max(0, min(ymin_d, H_d - 1))
+    ymax_d = max(0, min(ymax_d, H_d - 1))
+    xmin_d = max(0, min(xmin_d, W_d - 1))
+    xmax_d = max(0, min(xmax_d, W_d - 1))
+
+    bbox = [ymin_d, xmin_d, ymax_d, xmax_d]
+    print(f"Scaled bbox in depth space: {bbox}")
 
     # Optionally expand bbox in image space by a percentage along all directions
     if expand_percentage and expand_percentage > 0.0:
         ymin, xmin, ymax, xmax = bbox
-        H, W = rgb_img.shape[0], rgb_img.shape[1]
+        H, W = depth_img.shape[0], depth_img.shape[1]
         height_px = max(1, (ymax - ymin))
         width_px = max(1, (xmax - xmin))
         dy = int(round(0.5 * expand_percentage * height_px))
