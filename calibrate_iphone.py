@@ -701,11 +701,24 @@ def main() -> None:
         run_calibration(samples_json_path, output_extrinsics_path)
 
 def get_point_cloud(dirpath: str, visualize: bool = False):
+    # dirpath = "/Users/aditya/research/phd/code/spot/see-spot-plan/wipe_online_images_iphone"
+    # rgb_image_path = os.path.join(dirpath, "rgb_20251203_155935.png")
+    # depth_image_path = os.path.join(dirpath, "depth_20251203_154258.npy")
+    # intrinsics_path = os.path.join(dirpath, "intrinsics_20251203_155935.json")
+    # K = np.array(json.load(open(intrinsics_path))["K"], dtype=np.float64)
+    # rgb = cv2.cvtColor(cv2.imread(rgb_image_path), cv2.COLOR_BGR2RGB)
+    # depth = np.load(depth_image_path)
+    # points, colors = rgbd_to_point_cloud(rgb, depth, K)
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(points)
+    # pcd.colors = o3d.utility.Vector3dVector(colors)
+    # o3d.visualization.draw_geometries([pcd])
+
     rgb_path = os.path.join(dirpath, "iphone_rgb.png")
     depth_path = os.path.join(dirpath, "iphone_depth.npy")
     intrinsics_path = os.path.join(dirpath, "iphone_intrinsics.json")
     K = np.array(json.load(open(intrinsics_path))["K"], dtype=np.float64)
-    rgb = cv2.imread(rgb_path)
+    rgb = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
     depth = np.load(depth_path)
     points, colors = rgbd_to_point_cloud(rgb, depth, K)
     pcd = o3d.geometry.PointCloud()
