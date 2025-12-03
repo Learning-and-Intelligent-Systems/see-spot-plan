@@ -34,6 +34,7 @@ from typing import List, Optional, Tuple
 import cv2
 import open3d as o3d
 import numpy as np
+import rerun as rr
 from bosdyn.api import image_pb2
 from bosdyn.client import create_standard_sdk, math_helpers
 from bosdyn.client.frame_helpers import BODY_FRAME_NAME, get_a_tform_b
@@ -45,6 +46,9 @@ from spot_utils.perception.spot_cameras import _image_response_to_image
 from spot_utils.utils import verify_estop
 
 from iphone_kiwi_receiver import KiwiReceiver
+
+
+rr.init("calibrate_iphone", spawn=True)
 
 
 def rgbd_to_point_cloud(
@@ -117,6 +121,8 @@ class SpotFrame:
     depth_path: str
     camera_matrix: List[List[float]]  # 3x3 intrinsics
     T_body_hand: List[List[float]]  # 4x4 BODY->hand camera
+    rgb: np.ndarray
+    depth: np.ndarray
 
 
 @dataclass
@@ -132,6 +138,8 @@ class IphoneFrame:
     rgb_path: str
     depth_path: str
     camera_matrix: List[List[float]]  # 3x3 intrinsics
+    rgb: np.ndarray
+    depth: Optional[np.ndarray]
 
 
 @dataclass
@@ -166,7 +174,7 @@ def _capture_spot_hand_frame(
     save_dir: Path,
     sample_idx: int,
 ) -> SpotFrame:
-    """Capture RGB + BODY->hand transform from Spot's in-hand camera.
+    """Capture RGBD + BODY->hand transform from Spot's in-hand camera.
 
     This version uses the Image service directly and does not require a lease
     or SpotLocalizer. It relies on the transforms snapshot attached to the
@@ -175,16 +183,24 @@ def _capture_spot_hand_frame(
     camera_name = "hand_color_image"
     image_client = robot.ensure_client(ImageClient.default_service_name)
 
-    # For hand_color_image, let Spot choose appropriate pixel format.
+    # Build RGB + depth image requests for the hand camera.
     rgb_req = build_image_request(
         camera_name,
         quality_percent=100,
         pixel_format=None,
     )
-    responses = image_client.get_image([rgb_req])
-    rgb_resp = responses[0]
+    depth_req = build_image_request(
+        "hand_depth_in_hand_color_frame",
+        quality_percent=100,
+        pixel_format=None,
+    )
+    responses = image_client.get_image([rgb_req, depth_req])
+    name_to_resp = {r.source.name: r for r in responses}
+    rgb_resp = name_to_resp[camera_name]
+    depth_resp = name_to_resp["hand_depth_in_hand_color_frame"]
 
     rgb = _image_response_to_image(rgb_resp)
+    depth = _image_response_to_image(depth_resp)
 
     sample_dir = save_dir / f"sample_{sample_idx:04d}"
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -193,11 +209,9 @@ def _capture_spot_hand_frame(
     depth_path = sample_dir / "spot_depth.png"
     intrinsics_path = sample_dir / "spot_intrinsics.json"
 
-    # Save images to disk (depth is not used but we keep the path for symmetry)
+    # Save images to disk
     cv2.imwrite(str(rgb_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-    # Create an empty placeholder depth image.
-    dummy_depth = np.zeros(rgb.shape[:2], dtype=np.uint16)
-    cv2.imwrite(str(depth_path), dummy_depth)
+    cv2.imwrite(str(depth_path), depth)
 
     cam = rgb_resp.source.pinhole.intrinsics
     K = np.array(
@@ -234,6 +248,8 @@ def _capture_spot_hand_frame(
         depth_path=str(depth_path),
         camera_matrix=K.tolist(),
         T_body_hand=T_body_hand.tolist(),
+        rgb=rgb,
+        depth=depth,
     )
 
 
@@ -257,17 +273,19 @@ def _capture_iphone_frame(
     intrinsics_path = sample_dir / "iphone_intrinsics.json"
 
     frame = receiver.recv_frame()
+    rgb = frame.rgb
+    depth = frame.depth
 
-    # Save RGB image
-    # frame.rgb is RGB; OpenCV expects BGR
-    cv2.imwrite(str(rgb_path), cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR))
+    # Save RGB image (frame.rgb is RGB; OpenCV expects BGR)
+    cv2.imwrite(str(rgb_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
 
     # Save depth if available
-    if frame.depth is not None:
-        np.save(str(depth_path), frame.depth.astype(np.float32))
+    if depth is not None:
+        np.save(str(depth_path), depth.astype(np.float32))
     else:
         # Create an empty placeholder depth if none is provided
-        np.save(str(depth_path), np.zeros(frame.rgb.shape[:2], dtype=np.float32))
+        depth = np.zeros(rgb.shape[:2], dtype=np.float32)
+        np.save(str(depth_path), depth.astype(np.float32))
 
     # Save intrinsics
     K = np.asarray(frame.intrinsics, dtype=np.float64)
@@ -280,6 +298,8 @@ def _capture_iphone_frame(
         rgb_path=str(rgb_path),
         depth_path=str(depth_path),
         camera_matrix=K.tolist(),
+        rgb=rgb,
+        depth=depth,
     )
 
 
@@ -429,6 +449,39 @@ def collect_calibration_data(
             print(f"[WARN] Skipping sample {idx}: could not load iPhone data: {e}")
             continue
         K_iphone = np.array(iphone_frame.camera_matrix, dtype=np.float64)
+
+        # 2b) Log RGB + point clouds for both cameras to Rerun for this sample.
+        rr.set_time_sequence("sample", idx)
+
+        # Spot hand camera logs: RGB + point cloud (no depth image)
+        rr.log("spot/hand/rgb", rr.Image(spot_frame.rgb))
+
+        points_spot_cam, colors_spot = rgbd_to_point_cloud(
+            spot_frame.rgb, spot_frame.depth, K_hand, depth_scale=1000.0
+        )
+        if points_spot_cam.size > 0:
+            rr.log(
+                "spot/hand/points3d_cam",
+                rr.Points3D(
+                    positions=points_spot_cam,
+                    colors=(colors_spot * 255).astype(np.uint8),
+                ),
+            )
+
+        # iPhone logs: RGB + point cloud (no depth image)
+        rr.log("iphone/rgb", rr.Image(iphone_frame.rgb))
+        if iphone_frame.depth is not None:
+            points_iphone_cam, colors_iphone = rgbd_to_point_cloud(
+                iphone_frame.rgb, iphone_frame.depth, K_iphone, depth_scale=1.0
+            )
+            if points_iphone_cam.size > 0:
+                rr.log(
+                    "iphone/points3d_cam",
+                    rr.Points3D(
+                        positions=points_iphone_cam,
+                        colors=(colors_iphone * 255).astype(np.uint8),
+                    ),
+                )
 
         # 3) Charuco pose in hand camera
         res_hand = _detect_charuco_pose(
