@@ -192,7 +192,7 @@ def wipe_at(*args, **kwargs) -> None:
     )
 
 
-def press(text_prompt: Optional[str]) -> None:
+def press_button(text_prompt: Optional[str]) -> None:
     """Identify a button and push it using the hand camera.
 
     If text_prompt is provided, it will be used as the label (e.g., "button").
@@ -203,8 +203,6 @@ def press(text_prompt: Optional[str]) -> None:
             ROBOT,
             LOCALIZER,
             label=label,
-            sam_endpoint=SAM_ENDPOINT,
-            use_vlm=True,
         )
 
 

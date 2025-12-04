@@ -129,7 +129,7 @@ def get_multiple_pixels_from_gemini(
     Expects the model to respond with a JSON array like:
     [ {"point": [y, x]}, ... ] with coordinates normalized to [0, 1000].
     """
-    vlm = GoogleGeminiVLM("gemini-2.0-flash")
+    vlm = GoogleGeminiVLM("gemini-2.5-pro")
 
     def parse_json_output(json_output_str: str) -> str:
         lines = json_output_str.splitlines()
@@ -278,8 +278,8 @@ def push_button(
     rr.log("pcd", rr.Points3D(positions=points, colors=colors, radii=0.01))
     num_points = 10
 
-    vlm_query = """
-    Point upto {num_points} points on the brown button in the image. Return a JSON list like [{"point": [y, x]}, ...] with coordinates normalized to 0-1000.
+    vlm_query = f"""
+    Point up to {num_points} points on the {label} in the image. Return a JSON list like [{{"point": [y, x]}}, ...] with coordinates normalized to 0-1000.
     """
     # 2) Select pixel(s) via VLM only
     pixels = get_multiple_pixels_from_gemini(vlm_query, pil, num_pixels=num_points)
