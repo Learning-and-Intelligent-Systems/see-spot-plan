@@ -325,29 +325,48 @@ def push_button(
         centroid_body = P[0]
         normal_body = np.array([1.0, 0.0, 0.0])
 
-    # 4) Build approach/press using plane normal
-    approach = math_helpers.SE3Pose(
-        x=float(centroid_body[0] - z_clearance * normal_body[0]),
-        y=float(centroid_body[1] - z_clearance * normal_body[1]),
-        z=float(centroid_body[2] - z_clearance * normal_body[2]),
-        rot=math_helpers.Quat(),  # temporary; set below
-    )
+    # 4) Build approach/press poses.
+    # For horizontal surfaces, use a "tip-down" orientation (hand looking down)
+    # and press along the body Z axis so the tip of the hand makes contact.
+    if surface == "horizontal":
+        tip_down_rot = DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE.rot
+        approach = math_helpers.SE3Pose(
+            x=float(centroid_body[0]),
+            y=float(centroid_body[1]),
+            z=float(centroid_body[2] + z_clearance),
+            rot=tip_down_rot,
+        )
+        press = math_helpers.SE3Pose(
+            x=approach.x,
+            y=approach.y,
+            z=approach.z - press_depth,
+            rot=tip_down_rot,
+        )
+    else:
+        # Preserve the previous normal-based behavior for vertical surfaces:
+        # align the hand's forward axis with the plane normal and press along it.
+        approach = math_helpers.SE3Pose(
+            x=float(centroid_body[0] - z_clearance * normal_body[0]),
+            y=float(centroid_body[1] - z_clearance * normal_body[1]),
+            z=float(centroid_body[2] - z_clearance * normal_body[2]),
+            rot=math_helpers.Quat(),  # temporary; set below
+        )
 
-    press = math_helpers.SE3Pose(
-        x=float(approach.x + press_depth * normal_body[0]),
-        y=float(approach.y + press_depth * normal_body[1]),
-        z=float(approach.z + press_depth * normal_body[2]),
-        rot=math_helpers.Quat(),
-    )
+        press = math_helpers.SE3Pose(
+            x=float(approach.x + press_depth * normal_body[0]),
+            y=float(approach.y + press_depth * normal_body[1]),
+            z=float(approach.z + press_depth * normal_body[2]),
+            rot=math_helpers.Quat(),
+        )
 
-    # Orient hand so its forward axis aligns with normal (yaw+pitch approximation)
-    nx, ny, nz = normal_body
-    yaw = float(np.arctan2(ny, nx))
-    hyp = float(np.sqrt(nx * nx + ny * ny))
-    pitch = float(-np.arctan2(nz, max(hyp, 1e-9)))
-    rot = math_helpers.Quat.from_yaw(yaw) * math_helpers.Quat.from_pitch(pitch)
-    approach = math_helpers.SE3Pose(x=approach.x, y=approach.y, z=approach.z, rot=rot)
-    press = math_helpers.SE3Pose(x=press.x, y=press.y, z=press.z, rot=rot)
+        # Orient hand so its forward axis aligns with normal (yaw+pitch approximation)
+        nx, ny, nz = normal_body
+        yaw = float(np.arctan2(ny, nx))
+        hyp = float(np.sqrt(nx * nx + ny * ny))
+        pitch = float(-np.arctan2(nz, max(hyp, 1e-9)))
+        rot = math_helpers.Quat.from_yaw(yaw) * math_helpers.Quat.from_pitch(pitch)
+        approach = math_helpers.SE3Pose(x=approach.x, y=approach.y, z=approach.z, rot=rot)
+        press = math_helpers.SE3Pose(x=press.x, y=press.y, z=press.z, rot=rot)
 
     ## close the gripper 
     close_gripper(robot)
