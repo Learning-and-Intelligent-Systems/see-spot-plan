@@ -132,5 +132,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     uvicorn.run("exec_plan_api:app", host=args.host, port=args.port, reload=False)
-
-
