@@ -226,8 +226,8 @@ def push_button(
     label: str = "button",
     surface: Literal["vertical", "horizontal"] = "horizontal",
     z_clearance: float = 0.03,
-    press_depth: float = 0.025,
-    press_duration: float = 0.7,
+    press_depth: float = 0.01,
+    press_duration: float = 0.5,
 ) -> None:
     """Identify a button and push on it.
 
