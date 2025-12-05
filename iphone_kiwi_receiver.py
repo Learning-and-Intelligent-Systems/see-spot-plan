@@ -135,8 +135,8 @@ class KiwiReceiver:
         # 6) Transform (ARKit uses column-major)
         transform = np.array(frame_proto.transform, dtype=np.float32).reshape(4, 4).T
 
-        # 7) Intrinsics (3x3)
-        intrinsics = np.array(frame_proto.intrinsics, dtype=np.float32).reshape(3, 3)
+        # 7) Intrinsics (3x3) - also transposed like transform
+        intrinsics = np.array(frame_proto.intrinsics, dtype=np.float32).reshape(3, 3).T
 
         return IphoneRGBDFrame(
             rgb=rgb,
