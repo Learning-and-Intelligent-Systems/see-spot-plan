@@ -27,6 +27,7 @@ import argparse
 import dataclasses
 import json
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -49,6 +50,51 @@ from iphone_kiwi_receiver import KiwiReceiver
 
 
 rr.init("calibrate_iphone", spawn=True)
+
+
+class ThreadedKiwiReceiver:
+    """Wrapper around KiwiReceiver that continuously drains frames in a background thread.
+
+    This ensures we always get the latest frame from the iPhone TCP stream,
+    rather than buffered/old frames that accumulate in the TCP queue.
+    """
+
+    def __init__(self):
+        """Initialize and start the background receiver thread."""
+        self._receiver = KiwiReceiver()
+        self._latest_frame = None
+        self._lock = threading.Lock()
+        self._running = True
+        self._thread = threading.Thread(target=self._receive_loop, daemon=True)
+        self._thread.start()
+        print("[INFO] Started background iPhone frame receiver thread")
+
+    def _receive_loop(self):
+        """Background thread that continuously receives frames."""
+        while self._running:
+            try:
+                frame = self._receiver.recv_frame()
+                with self._lock:
+                    self._latest_frame = frame
+            except Exception as e:
+                if self._running:
+                    print(f"[WARN] Error receiving iPhone frame: {e}")
+                break
+
+    def get_latest_frame(self):
+        """Get the most recent frame received from the iPhone.
+
+        Returns:
+            The latest frame object from KiwiReceiver, or None if no frames received yet.
+        """
+        with self._lock:
+            return self._latest_frame
+
+    def stop(self):
+        """Stop the background receiver thread."""
+        self._running = False
+        self._thread.join(timeout=2.0)
+        print("[INFO] Stopped background iPhone frame receiver thread")
 
 
 def rgbd_to_point_cloud(
@@ -254,14 +300,14 @@ def _capture_spot_hand_frame(
 
 
 def _capture_iphone_frame(
-    receiver: KiwiReceiver,
+    receiver: ThreadedKiwiReceiver,
     save_dir: Path,
     sample_idx: int,
 ) -> IphoneFrame:
-    """Capture RGBD + intrinsics from the iPhone via KiwiReceiver.
+    """Capture RGBD + intrinsics from the iPhone via ThreadedKiwiReceiver.
 
     For each sample, we:
-      - Block on `receiver.recv_frame()` to get one RGBD frame + intrinsics.
+      - Get the latest frame from the background receiver thread.
       - Save RGB, depth, and intrinsics to disk under sample_XXXX/.
       - Return an IphoneFrame pointing to those saved files.
     """
@@ -272,7 +318,9 @@ def _capture_iphone_frame(
     depth_path = sample_dir / "iphone_depth.npy"
     intrinsics_path = sample_dir / "iphone_intrinsics.json"
 
-    frame = receiver.recv_frame()
+    frame = receiver.get_latest_frame()
+    if frame is None:
+        raise RuntimeError("No iPhone frame received yet. Ensure iPhone is streaming.")
     rgb = frame.rgb
     depth = frame.depth
 
@@ -416,19 +464,18 @@ def collect_calibration_data(
     For each sample:
       - Waits for user to position the arm/board and press Enter.
       - Captures Spot hand RGBD and saves to disk.
-      - Reads the corresponding iPhone RGBD + intrinsics from disk.
+      - Gets the latest iPhone RGBD + intrinsics from the background receiver.
       - Estimates Charuco poses in both cameras.
       - Saves a CalibrationSample into samples.json.
 
-    NOTE: This assumes that by the time you press Enter for a sample,
-    you have already captured and saved the iPhone data for that sample
-    into the expected paths under `output_dir / sample_XXXX/`.
+    The iPhone receiver runs in a background thread, continuously draining
+    the TCP stream to ensure we always get the freshest frame.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     board = _build_charuco_board()
 
     samples: List[CalibrationSample] = []
-    receiver = KiwiReceiver()
+    receiver = ThreadedKiwiReceiver()
 
     for idx in range(num_samples):
         print()
@@ -471,8 +518,32 @@ def collect_calibration_data(
         # iPhone logs: RGB + point cloud (no depth image)
         rr.log("iphone/rgb", rr.Image(iphone_frame.rgb))
         if iphone_frame.depth is not None:
+            # The iPhone intrinsics K are defined for the RGB resolution, which
+            # is currently assumed to be 720x960 (H x W). The depth is lower
+            # resolution (e.g. 192x256), so we scale K to the depth resolution
+            # before constructing the point cloud.
+            depth_h, depth_w = iphone_frame.depth.shape[:2]
+            base_h, base_w = 720.0, 960.0
+            sx = depth_w / base_w
+            sy = depth_h / base_h
+
+            fx, fy, cx, cy = (
+                K_iphone[0, 0],
+                K_iphone[1, 1],
+                K_iphone[0, 2],
+                K_iphone[1, 2],
+            )
+            K_scaled = np.array(
+                [
+                    [fx * sx, 0.0, cx * sx],
+                    [0.0, fy * sy, cy * sy],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            )
+
             points_iphone_cam, colors_iphone = rgbd_to_point_cloud(
-                iphone_frame.rgb, iphone_frame.depth, K_iphone, depth_scale=1.0
+                iphone_frame.rgb, iphone_frame.depth, K_scaled, depth_scale=1.0
             )
             if points_iphone_cam.size > 0:
                 rr.log(
@@ -526,6 +597,9 @@ def collect_calibration_data(
         json.dump([dataclasses.asdict(s) for s in samples], f, indent=2)
 
     print(f"[INFO] Saved {len(samples)} valid calibration samples to {samples_json_path}")
+
+    # Stop the background receiver thread
+    receiver.stop()
 
 
 def _load_samples(samples_json_path: Path) -> List[CalibrationSample]:
@@ -659,6 +733,131 @@ def _compute_T_body_iphone(
     return T_mean
 
 
+def _visualize_aligned_point_clouds(
+    samples: List[CalibrationSample],
+    T_body_iphone: np.ndarray,
+    samples_root: Path,
+    max_samples: int = 3,
+) -> None:
+    """Reload a few samples and visualize Spot/iPhone clouds in BODY frame.
+
+    For each sample, this:
+      - Reconstructs point clouds in each camera frame from the saved RGBD.
+      - Transforms Spot hand and iPhone clouds into the BODY frame.
+      - Logs both clouds to Rerun for visual inspection of the calibration.
+    """
+    T_iphone_body = np.linalg.inv(T_body_iphone)
+
+    def _transform_points(T: np.ndarray, pts: np.ndarray) -> np.ndarray:
+        """Apply a 4x4 transform to an Nx3 point cloud."""
+        if pts.size == 0:
+            return pts
+        pts_h = np.concatenate(
+            [pts.astype(np.float64), np.ones((pts.shape[0], 1), dtype=np.float64)],
+            axis=1,
+        )
+        pts_body_h = (T @ pts_h.T).T
+        return pts_body_h[:, :3].astype(np.float32)
+
+    for idx, s in enumerate(samples[:max_samples]):
+        sample_dir = samples_root / f"sample_{idx:04d}"
+
+        # --- Spot hand camera data ---
+        spot_rgb_path = sample_dir / "spot_rgb.png"
+        spot_depth_path = sample_dir / "spot_depth.png"
+        spot_intrinsics_path = sample_dir / "spot_intrinsics.json"
+
+        if not spot_rgb_path.exists() or not spot_depth_path.exists() or not spot_intrinsics_path.exists():
+            continue
+
+        with open(spot_intrinsics_path, "r") as f:
+            intr_hand = json.load(f)
+        K_hand = np.array(intr_hand["K"], dtype=np.float32)
+
+        rgb_hand_bgr = cv2.imread(str(spot_rgb_path), cv2.IMREAD_COLOR)
+        if rgb_hand_bgr is None:
+            continue
+        rgb_hand = cv2.cvtColor(rgb_hand_bgr, cv2.COLOR_BGR2RGB)
+        depth_hand = cv2.imread(str(spot_depth_path), cv2.IMREAD_UNCHANGED)
+        if depth_hand is None:
+            continue
+
+        pts_hand_cam, colors_hand = rgbd_to_point_cloud(
+            rgb_hand, depth_hand, K_hand, depth_scale=1000.0
+        )
+
+        # --- iPhone data ---
+        iphone_rgb_path = sample_dir / "iphone_rgb.png"
+        iphone_depth_path = sample_dir / "iphone_depth.npy"
+        iphone_intrinsics_path = sample_dir / "iphone_intrinsics.json"
+
+        if not iphone_rgb_path.exists() or not iphone_depth_path.exists() or not iphone_intrinsics_path.exists():
+            continue
+
+        with open(iphone_intrinsics_path, "r") as f:
+            intr_iphone = json.load(f)
+        K_iphone = np.array(intr_iphone["K"], dtype=np.float32)
+
+        rgb_iphone_bgr = cv2.imread(str(iphone_rgb_path), cv2.IMREAD_COLOR)
+        if rgb_iphone_bgr is None:
+            continue
+        rgb_iphone = cv2.cvtColor(rgb_iphone_bgr, cv2.COLOR_BGR2RGB)
+        depth_iphone = np.load(str(iphone_depth_path))
+
+        # Scale iPhone intrinsics from assumed RGB resolution (720x960) to
+        # the actual depth resolution before constructing the point cloud.
+        depth_h, depth_w = depth_iphone.shape[:2]
+        base_h, base_w = 720.0, 960.0
+        sx = depth_w / base_w
+        sy = depth_h / base_h
+
+        fx_i, fy_i, cx_i, cy_i = (
+            K_iphone[0, 0],
+            K_iphone[1, 1],
+            K_iphone[0, 2],
+            K_iphone[1, 2],
+        )
+        K_iphone_scaled = np.array(
+            [
+                [fx_i * sx, 0.0, cx_i * sx],
+                [0.0, fy_i * sy, cy_i * sy],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+
+        pts_iphone_cam, colors_iphone = rgbd_to_point_cloud(
+            rgb_iphone, depth_iphone, K_iphone_scaled, depth_scale=1.0
+        )
+
+        # --- Transform into BODY frame ---
+        T_body_hand = np.array(s.T_body_hand, dtype=np.float64)
+
+        pts_hand_body = _transform_points(T_body_hand, pts_hand_cam)
+        pts_iphone_body = _transform_points(T_iphone_body, pts_iphone_cam)
+
+        # --- Log to Rerun ---
+        rr.set_time_sequence("calib_sample", idx)
+
+        if pts_hand_body.size > 0:
+            rr.log(
+                "body/spot_hand_points",
+                rr.Points3D(
+                    positions=pts_hand_body,
+                    colors=(colors_hand * 255).astype(np.uint8),
+                ),
+            )
+
+        if pts_iphone_body.size > 0:
+            rr.log(
+                "body/iphone_points",
+                rr.Points3D(
+                    positions=pts_iphone_body,
+                    colors=(colors_iphone * 255).astype(np.uint8),
+                ),
+            )
+
+
 def run_calibration(
     samples_json_path: Path,
     output_extrinsics_path: Path,
@@ -689,6 +888,10 @@ def run_calibration(
         )
 
     print(f"[INFO] Saved extrinsics to {output_extrinsics_path}")
+
+    # Visualize a few aligned point clouds in the BODY frame to verify calibration.
+    samples_root = samples_json_path.parent
+    _visualize_aligned_point_clouds(samples, T_body_iphone, samples_root)
 
 
 def main() -> None:

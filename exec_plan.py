@@ -27,6 +27,7 @@ from skills.spot_hand_move import (
 from skills.wipe import wipe_multiple_strokes
 from skills.wipe_online import wipe_online as run_wipe_online
 from skills.push_button import push_button as run_push_button
+from skills.open_drawer import open_drawer as run_open_drawer
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
@@ -204,6 +205,30 @@ def press_button(text_prompt: Optional[str]) -> None:
             LOCALIZER,
             label=label,
         )
+
+
+def open_cabinet_drawer(
+    standoff_dist: float = 0.8,
+    body_height_offset: float = 0.0,
+    retreat_offset: float = 0.1,
+    checkpoint: int = 7,
+) -> None:
+    """Open a drawer using the high-level open_drawer skill.
+
+    This delegates to ``skills.open_drawer.open_drawer``, passing the
+    initialized global ``ROBOT`` and ``LOCALIZER``.
+    """
+    assert ROBOT is not None, "Robot is not initialized; call init(...) first."
+    assert LOCALIZER is not None, "Localizer is not initialized; call init(...) first."
+
+    run_open_drawer(
+        ROBOT,
+        LOCALIZER,
+        standoff_dist=standoff_dist,
+        body_height_offset=body_height_offset,
+        retreat_offset=retreat_offset,
+        checkpoint=checkpoint,
+    )
 
 
 if __name__ == "__main__":
