@@ -27,7 +27,6 @@ from skills.spot_hand_move import (
 from skills.wipe import wipe_multiple_strokes
 from skills.wipe_online import wipe_online as run_wipe_online
 from skills.push_button import push_button as run_push_button
-# from skills.open_cabinet import open_drawer as run_open_drawer
 from skills.open_cabinet import open_drawer as run_open_drawer
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
