@@ -11,12 +11,14 @@ import rerun as rr
 from PIL import Image
 from bosdyn.client import create_standard_sdk, math_helpers
 from bosdyn.client.frame_helpers import BODY_FRAME_NAME, VISION_FRAME_NAME, get_a_tform_b
+from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.sdk import Robot
 from bosdyn.client.util import authenticate
 
 from spot_utils.utils import verify_estop, get_graph_nav_dir
 from spot_utils.pretrained_model_interface import GoogleGeminiVLM
+from spot_utils.perception.spot_cameras import _image_response_to_image
 from skills.spot_hand_move import (
     move_hand_to_relative_pose,
     move_hand_to_relative_pose_with_velocity,
@@ -66,6 +68,39 @@ DEFAULT_WIPE_VLM_QUERY_TEMPLATE = (
     '{"bbox": [ymin, xmin, ymax, xmax], "label": "spill"}. '
     "The coordinates are in [ymin, xmin, ymax, xmax] format normalized to 0-1000."
 )
+
+DEFAULT_SPOT_HAND_CAMERA_NAME = "hand_color_image"
+
+
+def _get_T_body_hand_camera(robot: Robot, hand_camera_name: str = DEFAULT_SPOT_HAND_CAMERA_NAME) -> np.ndarray:
+    """Fetch the current BODY->hand camera transform using the snapshot attached to a hand-camera image.
+
+    Note: Spot's robot-state transform snapshot often does NOT include camera sensor frames.
+    The image response snapshot does, so we compute BODY->handcam from the image shot metadata.
+    """
+    image_client = robot.ensure_client(ImageClient.default_service_name)
+    rgb_req = build_image_request(
+        hand_camera_name,
+        quality_percent=100,
+        pixel_format=None,
+    )
+    responses = image_client.get_image([rgb_req])
+    if not responses:
+        raise RuntimeError(f"No image responses returned for camera '{hand_camera_name}'.")
+    resp = responses[0]
+    # Ensure decoding succeeds (also sanity-checks the response has data).
+    _ = _image_response_to_image(resp)
+    T_body_hand = get_a_tform_b(
+        resp.shot.transforms_snapshot,
+        BODY_FRAME_NAME,
+        resp.shot.frame_name_image_sensor,
+    )
+    if T_body_hand is None:
+        raise RuntimeError(
+            f"Could not compute BODY->hand camera transform from image snapshot. "
+            f"camera_name={hand_camera_name}, sensor_frame={resp.shot.frame_name_image_sensor}"
+        )
+    return np.asarray(T_body_hand.to_matrix(), dtype=np.float64)
 
 
 def _iphone_pixel_to_body_xyz(
@@ -684,7 +719,7 @@ def wipe_online(
     robot: Robot,
     lease_client: LeaseClient,
     lease_keepalive: LeaseKeepAlive,
-    T_body_iphone: np.ndarray,
+    T_hand_iphone: np.ndarray,
     vlm_query_template: Optional[str] = None,
     z_offset: float = DEFAULT_WIPE_ONLINE_Z_OFFSET,
     expand_percentage: float = 0.0,
@@ -756,6 +791,12 @@ def wipe_online(
 
     depth_m = depth_img.astype(np.float32)
     rr.log("camera/depth", rr.Image(depth_m))
+
+    # Compose BODY<-iPhone if we were given hand-camera extrinsics from calibration.
+    # Calibration typically produces T_handcam_iphone (aka T_spot_iphone in calibrate_iphone_will.py),
+    # but the wipe pipeline needs T_body_iphone for BODY-frame motion planning.
+    T_body_hand = _get_T_body_hand_camera(robot, DEFAULT_SPOT_HAND_CAMERA_NAME)
+    T_body_iphone = (T_body_hand @ T_hand_iphone).astype(np.float64)
 
     # Transform points from iPhone camera frame to BODY frame for visualization
     points_cam = points.astype(np.float32)
@@ -835,6 +876,7 @@ def wipe_online(
     )
     
     move_hand_to_relative_pose(robot, target_pose)
+    assert False
 
     ## compute the wipe parameters from the bounding box coordinates 
     (
@@ -934,7 +976,7 @@ def main() -> None:
         "--iphone_extrinsics",
         type=str,
         required=True,
-        help="Path to T_body_iphone JSON from calibrate_iphone.py",
+        help="Path to extrinsics JSON containing key T_hand_iphone (hand-camera<-iphone).",
     )
     parser.add_argument(
         "--z_offset",
@@ -953,22 +995,30 @@ def main() -> None:
     # rr.init("wipe_online", spawn=True)
 
     vlm_query_template = """
-I have an image with some text written on it, and I am interested in finding a bounding box for it. Can you give me the coordinates of the bounding box that encloses the written text? 
-The answer should follow the json format: {"bbox": [ymin, xmin, ymax, xmax], "label": "spill"}. 
-The coordinates are in [ymin, xmin, ymax, xmax] format normalized to 0-1000."""
-    # Load T_body_iphone extrinsics
+    "You are given an image. Identify the spill region (liquid/food spill/stain) if present.\n"
+    "Return a bounding box that tightly encloses the spill region.\n"
+    "If there is no spill visible or it is ambiguous, return a bbox of null.\n\n"
+    'Output format (return EXACTLY one JSON object and nothing else):\n'
+    '{"bbox": [ymin, xmin, ymax, xmax] | null, "label": "spill"}\n'
+    "The bbox coordinates MUST be normalized to 0-1000 and are in [ymin, xmin, ymax, xmax] order.\n"
+    """
+    
+    # Load hand-camera<-iphone extrinsics (calibration output)
     with open(args.iphone_extrinsics, "r") as f:
         extr = json.load(f)
-    T_body_iphone = np.array(extr["T_body_iphone"], dtype=np.float64)
+
+    if "T_hand_iphone" not in extr:
+        raise KeyError("Extrinsics JSON must contain key 'T_hand_iphone' (hand-camera<-iphone).")
+    T_hand_iphone = np.array(extr["T_hand_iphone"], dtype=np.float64)
 
     wipe_online(
         robot,
         lease_client,
         lease_keepalive,
-        T_body_iphone,
-        vlm_query_template,
-        args.z_offset,
-        args.expand_percentage,
+        T_hand_iphone=T_hand_iphone,
+        vlm_query_template=vlm_query_template,
+        z_offset=args.z_offset,
+        expand_percentage=args.expand_percentage,
     )
 
 if __name__ == "__main__":
