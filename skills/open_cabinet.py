@@ -459,9 +459,9 @@ def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
 def open_drawer(
     robot: Robot,
     localizer: SpotLocalizer,
-    standoff_dist: float = 0.8,
+    standoff_dist: float = 1.1,
     body_height_offset: float = 0.0,
-    retreat_offset: float = 0.1,
+    retreat_offset: float = 0.4,
 ) -> None:
     """
     Reach toward a drawer handle, close the gripper to grasp it, 
@@ -486,7 +486,7 @@ def open_drawer(
     depth_pil = Image.fromarray(depth)
     depth_pil.save("raw_hand_camera_depth.png")
     # rr.log_image("drawer_rgb", rgb)
-    rr.log("drawer_rgb", rgb)
+    rr.log("drawer_rgb", rr.Image(rgb))
     image_pil = Image.fromarray(rgb)
     image_pil.save("raw_hand_camera_output.jpg") 
 
@@ -534,16 +534,17 @@ def open_drawer(
     handle_3d_point = pixels_to_vision_points([handle_pixel], rgbd)[0]
     voxel_size = 0.005
     # rr.log_points("3D_points", positions=points_vision, colors=colors, radii=voxel_size / 2)
+    rr.log("3D_points", rr.Points3D(positions=points_vision, colors=colors, radii=voxel_size / 2))
     
     # Get pixels on surface of drawer via SAM (try just Gemini first, get 15 pixels on front of drawer)
     front_surface_pixels = get_multiple_pixels_from_gemini(prompt_get_drawer_surface_pixel, image_pil, 15)
     draw_colored_pixels(image_pil, front_surface_pixels, "annotated_hand_camera_output.jpg", "blue")
     # rr.log_image("drawer_pixels", np.array(image_pil))
-
+    rr.log("drawer_pixels", rr.Image(np.array(image_pil)))
     # Convert to 3D points on surface of drawer
     front_surface_3d_points = pixels_to_vision_points(front_surface_pixels, rgbd)
     # rr.log_points("surface_points", positions=front_surface_3d_points, colors=[255, 0, 0], radii=voxel_size * 1.5)
-
+    rr.log("surface_points", rr.Points3D(positions=front_surface_3d_points, colors=[255, 0, 0], radii=voxel_size * 1.5))
     # Fit a plane to those points via SVD and get normal vector
     _, normal_vector = fit_plane_to_points(front_surface_3d_points)
     # print("NORMAL VECTOR IS: ", normal_vector)
