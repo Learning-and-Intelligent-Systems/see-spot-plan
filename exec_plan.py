@@ -25,7 +25,8 @@ from skills.spot_hand_move import (
     stow_arm,
 )
 from skills.wipe import wipe_multiple_strokes
-from skills.wipe_online import wipe_online as run_wipe_online
+# from skills.wipe_online import wipe_online as run_wipe_online
+from skills.wipe_online_iphone import wipe_online as run_wipe_online
 from skills.push_button import push_button as run_push_button
 # from skills.open_cabinet import open_drawer as run_open_drawer
 from skills.open_cabinet import open_drawer as run_open_drawer

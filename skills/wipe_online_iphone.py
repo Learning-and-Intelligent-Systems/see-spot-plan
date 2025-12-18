@@ -3,6 +3,7 @@ from typing import Optional
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -60,16 +61,39 @@ direction_to_pose = {
     "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE,
 }
 
-DEFAULT_WIPE_ONLINE_Z_OFFSET = 0.02
+# TODO: check if this z offset is correct
+DEFAULT_WIPE_ONLINE_Z_OFFSET = 0.08
+# DEFAULT_WIPE_VLM_QUERY_TEMPLATE = (
+#     "I have an image with some text written on it, and I am interested in finding "
+#     "a bounding box for it. Can you give me the coordinates of the bounding box "
+#     "that encloses the written text? The answer should follow the json format: "
+#     '{"bbox": [ymin, xmin, ymax, xmax], "label": "spill"}. '
+#     "The coordinates are in [ymin, xmin, ymax, xmax] format normalized to 0-1000."
+# )
+
 DEFAULT_WIPE_VLM_QUERY_TEMPLATE = (
-    "I have an image with some text written on it, and I am interested in finding "
-    "a bounding box for it. Can you give me the coordinates of the bounding box "
-    "that encloses the written text? The answer should follow the json format: "
-    '{"bbox": [ymin, xmin, ymax, xmax], "label": "spill"}. '
-    "The coordinates are in [ymin, xmin, ymax, xmax] format normalized to 0-1000."
+    "You are given an image. Identify the spill region (liquid/food spill/stain) if present.\n"
+    "Return a bounding box that tightly encloses the spill region.\n"
+    "If there is no spill visible or it is ambiguous, return a bbox of null.\n\n"
+    'Output format (return EXACTLY one JSON object and nothing else):\n'
+    '{"bbox": [ymin, xmin, ymax, xmax] | null, "label": "spill"}\n'
+    "The bbox coordinates MUST be normalized to 0-1000 and are in [ymin, xmin, ymax, xmax] order.\n"
 )
 
 DEFAULT_SPOT_HAND_CAMERA_NAME = "hand_color_image"
+DEFAULT_IPHONE_EXTRINSICS_PATH = str((Path(__file__).resolve().parents[1] / "iphone_extrinsic.json"))
+
+
+def _load_T_hand_iphone(extrinsics_path: str) -> np.ndarray:
+    """Load T_hand_iphone (hand-camera<-iphone) from JSON."""
+    with open(extrinsics_path, "r") as f:
+        extr = json.load(f)
+    if "T_hand_iphone" not in extr:
+        raise KeyError(f"Extrinsics JSON must contain key 'T_hand_iphone': {extrinsics_path}")
+    T_hand_iphone = np.array(extr["T_hand_iphone"], dtype=np.float64)
+    if T_hand_iphone.shape != (4, 4):
+        raise ValueError(f"T_hand_iphone must be 4x4, got shape {T_hand_iphone.shape} in {extrinsics_path}")
+    return T_hand_iphone
 
 
 def _get_T_body_hand_camera(robot: Robot, hand_camera_name: str = DEFAULT_SPOT_HAND_CAMERA_NAME) -> np.ndarray:
@@ -143,7 +167,7 @@ def compute_target_pose_from_bbox_iphone(
     depth_m: np.ndarray,
     K_iphone: np.ndarray,
     T_body_iphone: np.ndarray,
-    z_clearance_m: float = 0.02,
+    z_clearance_m: float = 0.08,
 ) -> math_helpers.SE3Pose:
     """Compute BODY-frame target pose from bbox pixels in iPhone image."""
     ymin, xmin, ymax, xmax = bbox_pixels
@@ -164,7 +188,7 @@ def _compute_wipe_params_from_bbox_iphone(
     depth_m: np.ndarray,
     K_iphone: np.ndarray,
     T_body_iphone: np.ndarray,
-    clearance: float = 0.015,
+    clearance: float = 0.08,
     spacing_m: float = 0.05,
     max_stroke_len: float = 0.35,
 ):
@@ -178,11 +202,24 @@ def _compute_wipe_params_from_bbox_iphone(
     P_tr = _iphone_pixel_to_body_xyz(*p_tr, depth_m, K_iphone, T_body_iphone)
     P_bl = _iphone_pixel_to_body_xyz(*p_bl, depth_m, K_iphone, T_body_iphone)
 
+    rr.log("debug/bbox_true",
+        rr.Points3D([P_br, P_tr, P_bl], radii=0.01)
+    )
+
+    rr.log(
+        "debug/up_vec",
+        rr.Arrows3D(
+            origins=[P_br],
+            vectors=[P_tr - P_br],
+            colors=[[255, 0, 0]],
+        ),
+    )
+
     wipe_start_pose = math_helpers.SE3Pose(
         x=float(P_br[0]),
         y=float(P_br[1]),
         z=float(P_br[2] + clearance),
-        rot=math_helpers.Quat.from_pitch(np.pi / 2),
+        rot=math_helpers.Quat.from_pitch(np.pi / 2 - 0.087),
     )
 
     # Stroke direction (up)
@@ -198,6 +235,15 @@ def _compute_wipe_params_from_bbox_iphone(
     stroke_dx = float(up_dir[0] * stroke_len)
     stroke_dy = float(up_dir[1] * stroke_len)
 
+    rr.log(
+        "debug/up_vec_xy",
+        rr.Arrows3D(
+            origins=[P_br],
+            vectors=[[up_vec[0], up_vec[1], 0.0]],
+            colors=[[0, 255, 0]],
+        ),
+    )
+
     # Spacing across width (right -> left)
     side_vec = P_bl - P_br
     side_vec[2] = 0.0
@@ -210,7 +256,7 @@ def _compute_wipe_params_from_bbox_iphone(
         float(side_dir[0] * spacing_m),
         float(side_dir[1] * spacing_m),
     )
-    num_strokes = max(1, int(width_m / max(spacing_m, 1e-3)) + 1)
+    num_strokes = max(1, int(np.ceil(width_m / max(spacing_m, 1e-3))) + 1)
 
     end_look_pose = math_helpers.SE3Pose(
         x=0.65,
@@ -229,33 +275,33 @@ def _compute_wipe_params_from_bbox_iphone(
     )
 
 
-def visualize_bbox_normalized(image_path, bbox_norm, color=(0, 255, 0), thickness=2):
-    """
-    img: HxWx3 uint8 (BGR)
-    bbox_norm: [ymin, xmin, ymax, xmax] with each in [0, 1000]
-    """
-    img = cv2.imread(image_path)
-    H, W = img.shape[:2]
-    ymin, xmin, ymax, xmax = map(float, bbox_norm)
+# def visualize_bbox_normalized(image_path, bbox_norm, color=(0, 255, 0), thickness=2):
+#     """
+#     img: HxWx3 uint8 (BGR)
+#     bbox_norm: [ymin, xmin, ymax, xmax] with each in [0, 1000]
+#     """
+#     img = cv2.imread(image_path)
+#     H, W = img.shape[:2]
+#     ymin, xmin, ymax, xmax = map(float, bbox_norm)
 
-    # Scale normalized [0,1000] → pixels
-    x1 = int(np.clip(xmin * W / 1000.0, 0, W - 1))
-    y1 = int(np.clip(ymin * H / 1000.0, 0, H - 1))
-    x2 = int(np.clip(xmax * W / 1000.0, 0, W - 1))
-    y2 = int(np.clip(ymax * H / 1000.0, 0, H - 1))
+#     # Scale normalized [0,1000] → pixels
+#     x1 = int(np.clip(xmin * W / 1000.0, 0, W - 1))
+#     y1 = int(np.clip(ymin * H / 1000.0, 0, H - 1))
+#     x2 = int(np.clip(xmax * W / 1000.0, 0, W - 1))
+#     y2 = int(np.clip(ymax * H / 1000.0, 0, H - 1))
 
-    # Ensure non-degenerate box
-    if x2 <= x1: x2 = min(x1 + 1, W - 1)
-    if y2 <= y1: y2 = min(y1 + 1, H - 1)
+#     # Ensure non-degenerate box
+#     if x2 <= x1: x2 = min(x1 + 1, W - 1)
+#     if y2 <= y1: y2 = min(y1 + 1, H - 1)
 
-    # Rectangle
-    img_out = img.copy()
-    cv2.rectangle(img_out, (x1, y1), (x2, y2), color, thickness)
+#     # Rectangle
+#     img_out = img.copy()
+#     cv2.rectangle(img_out, (x1, y1), (x2, y2), color, thickness)
 
-    output_path = image_path.replace(".png", "_annotated.png").replace(".jpg", "_annotated.jpg")
-    cv2.imwrite(output_path, img_out)
+#     output_path = image_path.replace(".png", "_annotated.png").replace(".jpg", "_annotated.jpg")
+#     cv2.imwrite(output_path, img_out)
 
-    return img_out
+#     return img_out
 
 def draw_bounding_box(image_path, bbox_pixels, color=(0, 255, 0), thickness=2):
     """
@@ -298,85 +344,85 @@ def draw_bounding_box(image_path, bbox_pixels, color=(0, 255, 0), thickness=2):
     # return img_out
     return output_path
 
-def compute_target_pose_from_bbox(
-    rgbd,
-    bbox_pixels: list[int],
-    z_clearance_m: float = 0.02,
-) -> math_helpers.SE3Pose:
-    """
-    Compute the target pose from the bbox pixels.
-    bbox_pixels: [ymin, xmin, ymax, xmax] in pixel units.
-    """
-    ymin, xmin, ymax, xmax = bbox_pixels
-    u, v = int(xmax), int(ymax)  # bottom-right pixel
+# def compute_target_pose_from_bbox(
+#     rgbd,
+#     bbox_pixels: list[int],
+#     z_clearance_m: float = 0.02,
+# ) -> math_helpers.SE3Pose:
+#     """
+#     Compute the target pose from the bbox pixels.
+#     bbox_pixels: [ymin, xmin, ymax, xmax] in pixel units.
+#     """
+#     ymin, xmin, ymax, xmax = bbox_pixels
+#     u, v = int(xmax), int(ymax)  # bottom-right pixel
 
-    # Depth to meters
-    depth = rgbd.depth
-    depth_m = depth.astype(np.float32) / 1000.0 if depth.dtype == np.uint16 else depth.astype(np.float32)
+#     # Depth to meters
+#     depth = rgbd.depth
+#     depth_m = depth.astype(np.float32) / 1000.0 if depth.dtype == np.uint16 else depth.astype(np.float32)
 
-    z = float(depth_m[v, u]) if 0 <= v < depth_m.shape[0] and 0 <= u < depth_m.shape[1] else 0.0
-    if not np.isfinite(z) or z <= 0:
-        win = 3
-        v0, v1 = max(0, v - win), min(depth_m.shape[0], v + win + 1)
-        u0, u1 = max(0, u - win), min(depth_m.shape[1], u + win + 1)
-        patch = depth_m[v0:v1, u0:u1]
-        valid = patch[np.isfinite(patch) & (patch > 0)]
-        if valid.size == 0:
-            raise RuntimeError("No valid depth at or near bbox bottom-right.")
-        z = float(np.median(valid))
+#     z = float(depth_m[v, u]) if 0 <= v < depth_m.shape[0] and 0 <= u < depth_m.shape[1] else 0.0
+#     if not np.isfinite(z) or z <= 0:
+#         win = 3
+#         v0, v1 = max(0, v - win), min(depth_m.shape[0], v + win + 1)
+#         u0, u1 = max(0, u - win), min(depth_m.shape[1], u + win + 1)
+#         patch = depth_m[v0:v1, u0:u1]
+#         valid = patch[np.isfinite(patch) & (patch > 0)]
+#         if valid.size == 0:
+#             raise RuntimeError("No valid depth at or near bbox bottom-right.")
+#         z = float(np.median(valid))
 
-    cam = rgbd.camera_model.intrinsics
-    fx, fy = cam.focal_length.x, cam.focal_length.y
-    cx, cy = cam.principal_point.x, cam.principal_point.y
+#     cam = rgbd.camera_model.intrinsics
+#     fx, fy = cam.focal_length.x, cam.focal_length.y
+#     cx, cy = cam.principal_point.x, cam.principal_point.y
 
-    x_cam = (u - cx) / fx * z
-    y_cam = (v - cy) / fy * z
-    p_cam_h = np.array([x_cam, y_cam, z, 1.0], dtype=np.float64)
+#     x_cam = (u - cx) / fx * z
+#     y_cam = (v - cy) / fy * z
+#     p_cam_h = np.array([x_cam, y_cam, z, 1.0], dtype=np.float64)
 
-    T_vision_cam = get_a_tform_b(
-        rgbd.transforms_snapshot, VISION_FRAME_NAME, rgbd.frame_name_image_sensor
-    ).to_matrix()
-    T_body_vision = get_a_tform_b(
-        rgbd.transforms_snapshot, BODY_FRAME_NAME, VISION_FRAME_NAME
-    ).to_matrix()
+#     T_vision_cam = get_a_tform_b(
+#         rgbd.transforms_snapshot, VISION_FRAME_NAME, rgbd.frame_name_image_sensor
+#     ).to_matrix()
+#     T_body_vision = get_a_tform_b(
+#         rgbd.transforms_snapshot, BODY_FRAME_NAME, VISION_FRAME_NAME
+#     ).to_matrix()
 
-    p_body = (T_body_vision @ (T_vision_cam @ p_cam_h))[:3]
+#     p_body = (T_body_vision @ (T_vision_cam @ p_cam_h))[:3]
 
-    target_pose = math_helpers.SE3Pose(
-        x=float(p_body[0]),
-        y=float(p_body[1]),
-        z=float(p_body[2] + z_clearance_m),
-        rot=math_helpers.Quat.from_pitch(np.pi / 2),
-    )
+#     target_pose = math_helpers.SE3Pose(
+#         x=float(p_body[0]),
+#         y=float(p_body[1]),
+#         z=float(p_body[2] + z_clearance_m),
+#         rot=math_helpers.Quat.from_pitch(np.pi / 2),
+#     )
 
-    # move_hand_to_relative_pose(robot, target_pose)
-    return target_pose
+#     # move_hand_to_relative_pose(robot, target_pose)
+#     return target_pose
 
-def wipe_one_stroke(
-    robot: Robot,
-    wipe_start_pose: math_helpers.SE3Pose,
-    move_dx: float,
-    move_dy: float,
-    duration: float,
-):
-    """
-    Execute a single wipe stroke starting at wipe_start_pose and moving by
-    (move_dx, move_dy) in the BODY frame, then returning to the start.
-    """
-    move_hand_to_relative_pose(robot, wipe_start_pose)
-    first_move_pose = math_helpers.SE3Pose(
-        x=wipe_start_pose.x + move_dx,
-        y=wipe_start_pose.y + move_dy,
-        z=wipe_start_pose.z,
-        rot=wipe_start_pose.rot,
-    )
-    move_hand_to_relative_pose_with_velocity(
-        robot, wipe_start_pose, first_move_pose, duration
-    )
-    # Return to start pose
-    move_hand_to_relative_pose_with_velocity(
-        robot, first_move_pose, wipe_start_pose, duration
-    )
+# def wipe_one_stroke(
+#     robot: Robot,
+#     wipe_start_pose: math_helpers.SE3Pose,
+#     move_dx: float,
+#     move_dy: float,
+#     duration: float,
+# ):
+#     """
+#     Execute a single wipe stroke starting at wipe_start_pose and moving by
+#     (move_dx, move_dy) in the BODY frame, then returning to the start.
+#     """
+#     move_hand_to_relative_pose(robot, wipe_start_pose)
+#     first_move_pose = math_helpers.SE3Pose(
+#         x=wipe_start_pose.x + move_dx,
+#         y=wipe_start_pose.y + move_dy,
+#         z=wipe_start_pose.z,
+#         rot=wipe_start_pose.rot,
+#     )
+#     move_hand_to_relative_pose_with_velocity(
+#         robot, wipe_start_pose, first_move_pose, duration
+#     )
+#     # Return to start pose
+#     move_hand_to_relative_pose_with_velocity(
+#         robot, first_move_pose, wipe_start_pose, duration
+#     )
 
 def wipe_multiple_strokes(
     robot: Robot,
@@ -420,162 +466,162 @@ def wipe_multiple_strokes(
     # End look pose
     move_hand_to_relative_pose(robot, end_look_pose)
 
-def _pixel_to_body_xyz(u: int, v: int, rgbd) -> np.ndarray:
-    """Back-project a pixel (u, v) to BODY frame using rgbd intrinsics and transforms."""
-    depth = rgbd.depth
-    depth_m = depth.astype(np.float32) / 1000.0 if depth.dtype == np.uint16 else depth.astype(np.float32)
-    if v < 0 or v >= depth_m.shape[0] or u < 0 or u >= depth_m.shape[1]:
-        raise ValueError("Pixel out of bounds")
-    z = float(depth_m[v, u])
-    if not np.isfinite(z) or z <= 0:
-        # Small neighborhood fallback
-        win = 3
-        v0, v1 = max(0, v - win), min(depth_m.shape[0], v + win + 1)
-        u0, u1 = max(0, u - win), min(depth_m.shape[1], u + win + 1)
-        patch = depth_m[v0:v1, u0:u1]
-        vals = patch[np.isfinite(patch) & (patch > 0)]
-        if vals.size == 0:
-            raise RuntimeError("No valid depth near pixel")
-        z = float(np.median(vals))
-    cam = rgbd.camera_model.intrinsics
-    fx, fy = cam.focal_length.x, cam.focal_length.y
-    cx, cy = cam.principal_point.x, cam.principal_point.y
-    x_cam = (u - cx) / fx * z
-    y_cam = (v - cy) / fy * z
-    p_cam_h = np.array([x_cam, y_cam, z, 1.0], dtype=np.float64)
-    T_vision_cam = get_a_tform_b(
-        rgbd.transforms_snapshot, VISION_FRAME_NAME, rgbd.frame_name_image_sensor
-    ).to_matrix()
-    T_body_vision = get_a_tform_b(
-        rgbd.transforms_snapshot, BODY_FRAME_NAME, VISION_FRAME_NAME
-    ).to_matrix()
-    return (T_body_vision @ (T_vision_cam @ p_cam_h))[:3]
+# def _pixel_to_body_xyz(u: int, v: int, rgbd) -> np.ndarray:
+#     """Back-project a pixel (u, v) to BODY frame using rgbd intrinsics and transforms."""
+#     depth = rgbd.depth
+#     depth_m = depth.astype(np.float32) / 1000.0 if depth.dtype == np.uint16 else depth.astype(np.float32)
+#     if v < 0 or v >= depth_m.shape[0] or u < 0 or u >= depth_m.shape[1]:
+#         raise ValueError("Pixel out of bounds")
+#     z = float(depth_m[v, u])
+#     if not np.isfinite(z) or z <= 0:
+#         # Small neighborhood fallback
+#         win = 3
+#         v0, v1 = max(0, v - win), min(depth_m.shape[0], v + win + 1)
+#         u0, u1 = max(0, u - win), min(depth_m.shape[1], u + win + 1)
+#         patch = depth_m[v0:v1, u0:u1]
+#         vals = patch[np.isfinite(patch) & (patch > 0)]
+#         if vals.size == 0:
+#             raise RuntimeError("No valid depth near pixel")
+#         z = float(np.median(vals))
+#     cam = rgbd.camera_model.intrinsics
+#     fx, fy = cam.focal_length.x, cam.focal_length.y
+#     cx, cy = cam.principal_point.x, cam.principal_point.y
+#     x_cam = (u - cx) / fx * z
+#     y_cam = (v - cy) / fy * z
+#     p_cam_h = np.array([x_cam, y_cam, z, 1.0], dtype=np.float64)
+#     T_vision_cam = get_a_tform_b(
+#         rgbd.transforms_snapshot, VISION_FRAME_NAME, rgbd.frame_name_image_sensor
+#     ).to_matrix()
+#     T_body_vision = get_a_tform_b(
+#         rgbd.transforms_snapshot, BODY_FRAME_NAME, VISION_FRAME_NAME
+#     ).to_matrix()
+#     return (T_body_vision @ (T_vision_cam @ p_cam_h))[:3]
 
-def _compute_wipe_params_from_bbox(
-    rgbd,
-    bbox: list[int],
-    clearance: float = 0.015,
-    spacing_m: float = 0.05,
-    max_stroke_len: float = 0.35,
-):
-    """
-    From bbox [ymin,xmin,ymax,xmax] in pixels, compute:
-      - wipe_start_pose (at bottom-right corner + clearance)
-      - stroke_dx, stroke_dy (upwards along bbox height)
-      - delta_x_y_between_strokes (across bbox width)
-      - num_strokes (coverage based on spacing)
-      - end_look_pose (generic)
-    """
-    ymin, xmin, ymax, xmax = bbox
-    p_br = (int(xmax), int(ymax))
-    p_tr = (int(xmax), int(ymin))
-    p_bl = (int(xmin), int(ymax))
+# def _compute_wipe_params_from_bbox(
+#     rgbd,
+#     bbox: list[int],
+#     clearance: float = 0.015,
+#     spacing_m: float = 0.05,
+#     max_stroke_len: float = 0.35,
+# ):
+#     """
+#     From bbox [ymin,xmin,ymax,xmax] in pixels, compute:
+#       - wipe_start_pose (at bottom-right corner + clearance)
+#       - stroke_dx, stroke_dy (upwards along bbox height)
+#       - delta_x_y_between_strokes (across bbox width)
+#       - num_strokes (coverage based on spacing)
+#       - end_look_pose (generic)
+#     """
+#     ymin, xmin, ymax, xmax = bbox
+#     p_br = (int(xmax), int(ymax))
+#     p_tr = (int(xmax), int(ymin))
+#     p_bl = (int(xmin), int(ymax))
 
-    P_br = _pixel_to_body_xyz(*p_br, rgbd)
-    P_tr = _pixel_to_body_xyz(*p_tr, rgbd)
-    P_bl = _pixel_to_body_xyz(*p_bl, rgbd)
+#     P_br = _pixel_to_body_xyz(*p_br, rgbd)
+#     P_tr = _pixel_to_body_xyz(*p_tr, rgbd)
+#     P_bl = _pixel_to_body_xyz(*p_bl, rgbd)
 
-    # Start pose
-    wipe_start_pose = math_helpers.SE3Pose(
-        x=float(P_br[0]),
-        y=float(P_br[1]),
-        z=float(P_br[2] + clearance),
-        rot=math_helpers.Quat.from_pitch(np.pi / 2),
-    )
+#     # Start pose
+#     wipe_start_pose = math_helpers.SE3Pose(
+#         x=float(P_br[0]),
+#         y=float(P_br[1]),
+#         z=float(P_br[2] + clearance),
+#         rot=math_helpers.Quat.from_pitch(np.pi / 2),
+#     )
 
-    # Stroke direction (up)
-    up_vec = P_tr - P_br
-    up_vec[2] = 0.0
-    up_len = float(np.linalg.norm(up_vec[:2]))
-    if up_len < 1e-6:
-        up_len = 0.0
-        up_dir = np.array([0.0, 0.0])
-    else:
-        up_dir = up_vec[:2] / up_len
-    # Stroke length from bbox height, limited by max_stroke_len
-    stroke_len = min(up_len, max_stroke_len)
-    stroke_dx = float(up_dir[0] * stroke_len)
-    stroke_dy = float(up_dir[1] * stroke_len)
+#     # Stroke direction (up)
+#     up_vec = P_tr - P_br
+#     up_vec[2] = 0.0
+#     up_len = float(np.linalg.norm(up_vec[:2]))
+#     if up_len < 1e-6:
+#         up_len = 0.0
+#         up_dir = np.array([0.0, 0.0])
+#     else:
+#         up_dir = up_vec[:2] / up_len
+#     # Stroke length from bbox height, limited by max_stroke_len
+#     stroke_len = min(up_len, max_stroke_len)
+#     stroke_dx = float(up_dir[0] * stroke_len)
+#     stroke_dy = float(up_dir[1] * stroke_len)
 
-    # Spacing across width (right -> left)
-    side_vec = P_bl - P_br
-    side_vec[2] = 0.0
-    width_m = float(np.linalg.norm(side_vec[:2]))
-    if width_m > 1e-6:
-        side_dir = side_vec[:2] / width_m
-    else:
-        side_dir = np.array([0.0, 0.0])
-    delta_x_y_between_strokes = (float(side_dir[0] * spacing_m), float(side_dir[1] * spacing_m))
-    num_strokes = max(1, int(width_m / max(spacing_m, 1e-3))+1)
+#     # Spacing across width (right -> left)
+#     side_vec = P_bl - P_br
+#     side_vec[2] = 0.0
+#     width_m = float(np.linalg.norm(side_vec[:2]))
+#     if width_m > 1e-6:
+#         side_dir = side_vec[:2] / width_m
+#     else:
+#         side_dir = np.array([0.0, 0.0])
+#     delta_x_y_between_strokes = (float(side_dir[0] * spacing_m), float(side_dir[1] * spacing_m))
+#     num_strokes = max(1, int(width_m / max(spacing_m, 1e-3))+1)
 
-    end_look_pose = math_helpers.SE3Pose(
-        x=0.65, y=0.0, z=0.4, rot=math_helpers.Quat.from_pitch(np.pi / 2.5)
-    )
+#     end_look_pose = math_helpers.SE3Pose(
+#         x=0.65, y=0.0, z=0.4, rot=math_helpers.Quat.from_pitch(np.pi / 2.5)
+#     )
 
-    return (
-        wipe_start_pose,
-        stroke_dx,
-        stroke_dy,
-        delta_x_y_between_strokes,
-        num_strokes,
-        end_look_pose,
-    )
+#     return (
+#         wipe_start_pose,
+#         stroke_dx,
+#         stroke_dy,
+#         delta_x_y_between_strokes,
+#         num_strokes,
+#         end_look_pose,
+#     )
 
-def visualize_bbox_prediction(image_path, bbox):
-    """
-    Draws a SCALED bounding box on an image using OpenCV and displays it.
+# def visualize_bbox_prediction(image_path, bbox):
+#     """
+#     Draws a SCALED bounding box on an image using OpenCV and displays it.
 
-    Args:
-        image_path (str): Path to the ORIGINAL image file.
-        bbox (list): Bounding box [ymin, xmin, ymax, xmax] from the model,
-                     relative to the model's input size.
-    """
-    try:
-        # --- Dimensions of the image the model processed ---
-        # (This is the key piece of information you were missing)
-        model_height = 682
-        model_width = 910
+#     Args:
+#         image_path (str): Path to the ORIGINAL image file.
+#         bbox (list): Bounding box [ymin, xmin, ymax, xmax] from the model,
+#                      relative to the model's input size.
+#     """
+#     try:
+#         # --- Dimensions of the image the model processed ---
+#         # (This is the key piece of information you were missing)
+#         model_height = 682
+#         model_width = 910
 
-        # 1. Read the ORIGINAL image to get its true dimensions
-        img = cv2.imread(image_path)
-        if img is None:
-            print(f"Error: Could not read image from {image_path}")
-            return
+#         # 1. Read the ORIGINAL image to get its true dimensions
+#         img = cv2.imread(image_path)
+#         if img is None:
+#             print(f"Error: Could not read image from {image_path}")
+#             return
 
-        original_height, original_width, _ = img.shape
+#         original_height, original_width, _ = img.shape
         
-        # 2. Calculate scaling factors
-        y_scale = original_height / model_height
-        x_scale = original_width / model_width
+#         # 2. Calculate scaling factors
+#         y_scale = original_height / model_height
+#         x_scale = original_width / model_width
         
-        # 3. Unpack and scale the model's bounding box coordinates
-        ymin, xmin, ymax, xmax = bbox
+#         # 3. Unpack and scale the model's bounding box coordinates
+#         ymin, xmin, ymax, xmax = bbox
         
-        scaled_ymin = int(ymin * y_scale)
-        scaled_xmin = int(xmin * x_scale)
-        scaled_ymax = int(ymax * y_scale)
-        scaled_xmax = int(xmax * x_scale)
+#         scaled_ymin = int(ymin * y_scale)
+#         scaled_xmin = int(xmin * x_scale)
+#         scaled_ymax = int(ymax * y_scale)
+#         scaled_xmax = int(xmax * x_scale)
 
-        # 4. Define points for the rectangle using SCALED coordinates
-        pt1 = (scaled_xmin, scaled_ymin)
-        pt2 = (scaled_xmax, scaled_ymax)
+#         # 4. Define points for the rectangle using SCALED coordinates
+#         pt1 = (scaled_xmin, scaled_ymin)
+#         pt2 = (scaled_xmax, scaled_ymax)
         
-        # Define color (OpenCV uses BGR format, not RGB)
-        color_bgr = (0, 0, 255)  # Red
-        thickness = 3
+#         # Define color (OpenCV uses BGR format, not RGB)
+#         color_bgr = (0, 0, 255)  # Red
+#         thickness = 3
         
-        # 5. Draw the rectangle on the original image
-        cv2.rectangle(img, pt1, pt2, color_bgr, thickness)
+#         # 5. Draw the rectangle on the original image
+#         cv2.rectangle(img, pt1, pt2, color_bgr, thickness)
         
-        # 6. Save the annotated image
-        output_path = image_path.replace(".png", "_annotated.png").replace(".jpg", "_annotated.jpg")
-        cv2.imwrite(output_path, img)
+#         # 6. Save the annotated image
+#         output_path = image_path.replace(".png", "_annotated.png").replace(".jpg", "_annotated.jpg")
+#         cv2.imwrite(output_path, img)
         
-        print(f"Successfully saved annotated image to: {output_path}")
-        return output_path
+#         print(f"Successfully saved annotated image to: {output_path}")
+#         return output_path
 
-    except Exception as e:
-        print(f"An error occurred: {e}")
+#     except Exception as e:
+#         print(f"An error occurred: {e}")
     
 
 def get_bbox_from_gemini(
@@ -657,51 +703,51 @@ def get_bbox_from_gemini(
     return bbox
 
 
-def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
-    rgb = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
-    depth = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
+# def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
+#     rgb = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
+#     depth = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
 
-    if rgb is None:
-        raise FileNotFoundError(f"Could not read RGB image at: {rgb_image_path}")
-    if depth is None:
-        raise FileNotFoundError(f"Could not read depth image at: {depth_image_path}")
+#     if rgb is None:
+#         raise FileNotFoundError(f"Could not read RGB image at: {rgb_image_path}")
+#     if depth is None:
+#         raise FileNotFoundError(f"Could not read depth image at: {depth_image_path}")
 
-    # Ensure single-channel depth
-    if depth.ndim == 3:
-        depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
+#     # Ensure single-channel depth
+#     if depth.ndim == 3:
+#         depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
 
-    # Convert depth to meters if given as uint16 millimeters
-    if depth.dtype == np.uint16:
-        depth_m = depth.astype(np.float32) / 1000.0
-    else:
-        depth_m = depth.astype(np.float32)
+#     # Convert depth to meters if given as uint16 millimeters
+#     if depth.dtype == np.uint16:
+#         depth_m = depth.astype(np.float32) / 1000.0
+#     else:
+#         depth_m = depth.astype(np.float32)
 
-    h, w = depth_m.shape
-    if rgb.shape[:2] != (h, w):
-        rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_NEAREST)
+#     h, w = depth_m.shape
+#     if rgb.shape[:2] != (h, w):
+#         rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_NEAREST)
 
-    fx, fy, cx, cy = intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]
+#     fx, fy, cx, cy = intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]
 
-    # Create pixel grid
-    u_coords, v_coords = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+#     # Create pixel grid
+#     u_coords, v_coords = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
 
-    z = depth_m
-    valid = (z > 0) & (z <= 1.5)
+#     z = depth_m
+#     valid = (z > 0) & (z <= 1.5)
 
-    x = (u_coords - cx) / fx * z
-    y = (v_coords - cy) / fy * z
+#     x = (u_coords - cx) / fx * z
+#     y = (v_coords - cy) / fy * z
 
-    # Stack and mask
-    points = np.stack((x, y, z), axis=-1)[valid]
-    if points.shape[0] == 0:
-        print("No points passed the depth filter! Check depth image units and max distance.")
+#     # Stack and mask
+#     points = np.stack((x, y, z), axis=-1)[valid]
+#     if points.shape[0] == 0:
+#         print("No points passed the depth filter! Check depth image units and max distance.")
 
-    # Colors: convert BGR (cv2) to RGB and normalize to [0,1]
-    rgb_rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-    colors = (rgb_rgb.reshape(-1, 3)[valid.ravel()] / 255.0).astype(np.float32)
-    print("positions:", points.shape, points.dtype)
-    print("colors:", colors.shape, colors.dtype)
-    return points, colors
+#     # Colors: convert BGR (cv2) to RGB and normalize to [0,1]
+#     rgb_rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+#     colors = (rgb_rgb.reshape(-1, 3)[valid.ravel()] / 255.0).astype(np.float32)
+#     print("positions:", points.shape, points.dtype)
+#     print("colors:", colors.shape, colors.dtype)
+#     return points, colors
 
 
 def gaze(robot, direction: str) -> None:
@@ -719,16 +765,17 @@ def wipe_online(
     robot: Robot,
     lease_client: LeaseClient,
     lease_keepalive: LeaseKeepAlive,
-    T_hand_iphone: np.ndarray,
-    vlm_query_template: Optional[str] = None,
+    localizer=None,
+    vlm_query_template: str = DEFAULT_WIPE_VLM_QUERY_TEMPLATE,
     z_offset: float = DEFAULT_WIPE_ONLINE_Z_OFFSET,
     expand_percentage: float = 0.0,
+    iphone_extrinsics_path: str = DEFAULT_IPHONE_EXTRINSICS_PATH,
 ) -> None:
     # stow the arm
     stow_arm(robot)
     # have the robot look ahead to look at the spill 
     # gaze(robot, "AHEAD")
-    gaze_without_open(robot, "AHEAD")
+    gaze_without_open(robot, "DOWN")
     # gaze(robot, "DOWN")
     
     # Capture an RGBD frame from the iPhone
@@ -795,6 +842,7 @@ def wipe_online(
     # Compose BODY<-iPhone if we were given hand-camera extrinsics from calibration.
     # Calibration typically produces T_handcam_iphone (aka T_spot_iphone in calibrate_iphone_will.py),
     # but the wipe pipeline needs T_body_iphone for BODY-frame motion planning.
+    T_hand_iphone = _load_T_hand_iphone(iphone_extrinsics_path)
     T_body_hand = _get_T_body_hand_camera(robot, DEFAULT_SPOT_HAND_CAMERA_NAME)
     T_body_iphone = (T_body_hand @ T_hand_iphone).astype(np.float64)
 
@@ -813,8 +861,6 @@ def wipe_online(
     # Log the 3D points in BODY frame
     rr.log('scene/points3d_body', rr.Points3D(positions=points_body, colors=colors, radii=voxel_size/2))
 
-    if vlm_query_template is None:
-        vlm_query_template = DEFAULT_WIPE_VLM_QUERY_TEMPLATE
     # Run VLM on the full-resolution RGB image and get bbox in RGB pixel coordinates.
     bbox_rgb = get_bbox_from_gemini(vlm_query_template, rgb_pil)
     print(f"The coordinates of the bounding box (RGB space) are: {bbox_rgb}")
@@ -851,7 +897,7 @@ def wipe_online(
         print(f"Expanded bbox by {expand_percentage*100:.1f}% -> {bbox}")
 
     ## log the annotated image with the bounding box 
-    annotated_image_path = draw_bounding_box(os.path.join(save_folderpath, f"rgb_{timestamp}.png"), bbox)
+    annotated_image_path = draw_bounding_box(os.path.join(save_folderpath, f"rgb_{timestamp}.png"), bbox_rgb)
     annotated_img = cv2.cvtColor(cv2.imread(annotated_image_path), cv2.COLOR_BGR2RGB)
     rr.log('results/annotated', rr.Image(annotated_img))
 
@@ -871,12 +917,13 @@ def wipe_online(
         rr.Points3D(
             positions=np.array([[target_pose.x, target_pose.y, target_pose.z]], dtype=np.float32),
             colors=np.array([[255, 0, 0]], dtype=np.uint8),
-            radii=0.03,
+            radii=0.02,
         ),
     )
     
-    move_hand_to_relative_pose(robot, target_pose)
-    assert False
+    # move_hand_to_relative_pose(robot, target_pose)
+    
+    # return
 
     ## compute the wipe parameters from the bounding box coordinates 
     (
@@ -895,6 +942,18 @@ def wipe_online(
         spacing_m=0.05,
         max_stroke_len=0.35,
     )
+
+    # move_hand_to_relative_pose(robot, wipe_start_pose)
+    # first_move_pose = math_helpers.SE3Pose(
+    #     x=wipe_start_pose.x + stroke_dx,
+    #     y=wipe_start_pose.y + stroke_dy,
+    #     z=wipe_start_pose.z,
+    #     rot=wipe_start_pose.rot,
+    # )
+    # move_hand_to_relative_pose_with_velocity(
+    #     robot, wipe_start_pose, first_move_pose, 1.0
+    # )
+    # return
 
     # Visualize the wipe surface in BODY frame: corners, mesh, and stroke paths
     def _as_np_pose(p):
@@ -956,11 +1015,11 @@ def wipe_online(
         robot=robot,
         wipe_start_pose=wipe_start_pose,
         end_look_pose=end_look_pose,
-        stroke_dx=stroke_dx,
+        stroke_dx=stroke_dx + 0.05,
         stroke_dy=stroke_dy,
         delta_x_y_between_strokes=delta_x_y_between_strokes,
         num_strokes=num_strokes,
-        duration_per_stroke=1.0,
+        duration_per_stroke=1.5,
         num_attempts_per_stroke=1,
     )
 
@@ -975,13 +1034,14 @@ def main() -> None:
     parser.add_argument(
         "--iphone_extrinsics",
         type=str,
-        required=True,
+        required=False,
+        default=DEFAULT_IPHONE_EXTRINSICS_PATH,
         help="Path to extrinsics JSON containing key T_hand_iphone (hand-camera<-iphone).",
     )
     parser.add_argument(
         "--z_offset",
         type=float,
-        default=0.00,
+        default=0.08,
         help="Hand Z offset above surface in meters (clearance).",
     )
     parser.add_argument(
@@ -993,32 +1053,15 @@ def main() -> None:
     args = parser.parse_args()
     robot, lease_client, lease_keepalive = init_robot(args.hostname, "")
     # rr.init("wipe_online", spawn=True)
-
-    vlm_query_template = """
-    "You are given an image. Identify the spill region (liquid/food spill/stain) if present.\n"
-    "Return a bounding box that tightly encloses the spill region.\n"
-    "If there is no spill visible or it is ambiguous, return a bbox of null.\n\n"
-    'Output format (return EXACTLY one JSON object and nothing else):\n'
-    '{"bbox": [ymin, xmin, ymax, xmax] | null, "label": "spill"}\n'
-    "The bbox coordinates MUST be normalized to 0-1000 and are in [ymin, xmin, ymax, xmax] order.\n"
-    """
     
-    # Load hand-camera<-iphone extrinsics (calibration output)
-    with open(args.iphone_extrinsics, "r") as f:
-        extr = json.load(f)
-
-    if "T_hand_iphone" not in extr:
-        raise KeyError("Extrinsics JSON must contain key 'T_hand_iphone' (hand-camera<-iphone).")
-    T_hand_iphone = np.array(extr["T_hand_iphone"], dtype=np.float64)
-
     wipe_online(
         robot,
         lease_client,
         lease_keepalive,
-        T_hand_iphone=T_hand_iphone,
-        vlm_query_template=vlm_query_template,
+        localizer=None,
         z_offset=args.z_offset,
         expand_percentage=args.expand_percentage,
+        iphone_extrinsics_path=args.iphone_extrinsics,
     )
 
 if __name__ == "__main__":
