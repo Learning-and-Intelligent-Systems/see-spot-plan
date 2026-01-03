@@ -24,8 +24,8 @@ from spot_utils.utils import get_graph_nav_dir, get_robot_state, verify_estop
 def navigate_to_relative_pose(
     robot: Robot,
     body_tform_goal: math_helpers.SE2Pose,
-    max_xytheta_vel: Tuple[float, float, float] = (2.0, 2.0, 1.0),
-    min_xytheta_vel: Tuple[float, float, float] = (-2.0, -2.0, -1.0),
+    max_xytheta_vel: Tuple[float, float, float] = (0.5, 0.5, 0.25),
+    min_xytheta_vel: Tuple[float, float, float] = (-0.5, -0.5, -0.25),
     timeout: float = 20.0,
 ) -> None:
     """Execute a relative move.
