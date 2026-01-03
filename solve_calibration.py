@@ -643,6 +643,21 @@ def visualize_samples_with_rerun(samples: List[CalibrationSample]) -> None:
             for row in T_spot_iphone_avg:
                 print(f"    [{row[0]:9.6f}, {row[1]:9.6f}, {row[2]:9.6f}, {row[3]:9.6f}]")
 
+            # Save the transformation to JSON file
+            output_data = {
+                "frame_convention": "T_hand_iphone (hand camera <- iphone camera)",
+                "translation_m": avg_translation.tolist(),
+                "rotation_matrix": avg_rotation.tolist(),
+                "T_hand_iphone": T_spot_iphone_avg.tolist(),
+                "std_inliers_m": std_translation_inliers.tolist()
+            }
+
+            output_path = Path("iphone_extrinsics.json")
+            with open(output_path, "w") as f:
+                json.dump(output_data, f, indent=2)
+
+            print(f"\n[INFO] Saved transformation to {output_path}")
+
         print("="*80)
 
 
@@ -790,7 +805,7 @@ def visualize_accumulated_point_clouds(
 
 def main():
     """Main function to load and visualize calibration samples."""
-    base_dir = Path("calib_data/adilucy_test1")
+    base_dir = Path("iphone_calib_data")
 
     print(f"[INFO] Loading samples from {base_dir}")
     samples = load_all_samples(base_dir)
