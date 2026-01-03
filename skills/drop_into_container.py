@@ -140,7 +140,7 @@ def _iphone_pixel_to_body_xyz(
 
 DEFAULT_PLACE_VLM_QUERY_TEMPLATE = (
     "You are given an image of a container. Return one point that lies on the surface of the inside of the container where an object can be placed."
-    "Choose a placement point that does not lie on top of other objects/obstacles and is far away from the walls of the container."
+    "Choose a placement point that does not lie on top of other objects/obstacles and is far away from the edges of the container."
     "OUTPUT FORMAT (return EXACTLY one JSON object in the FORMAT below and NOTHING ELSE):\n"
     '{"point": [y, x], "label": "open_container_region"}. '
     "Coordinates MUST be normalized to 0-1000.\n"
@@ -298,7 +298,7 @@ def drop_into_container(
     rr.init("drop_into_container_skill", spawn=True)
 
     # 1) Move arm so iPhone can see the container clearly
-    gaze_without_open(robot, "AHEAD")
+    gaze_without_open(robot, "DOWN")
 
     # 2) Receive RGBD from iPhone
     receiver = KiwiReceiver()
@@ -410,10 +410,10 @@ def drop_into_container(
     )
     _rr_log_pose_point3d("place_at/target/above_pose_body", above_pose, radii=0.02)
 
-    # 7) Move above, open gripper
+    # 7) Move above, open gripper, stow war
     move_hand_to_relative_pose(robot, above_pose)
     open_gripper(robot)
-
+    stow_arm(robot)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Drop into controller.")
