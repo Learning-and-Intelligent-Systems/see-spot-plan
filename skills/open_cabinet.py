@@ -47,16 +47,21 @@ from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 import rerun as rr
 
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
+    x=0.90, y=0.0, z=-0.1, rot=math_helpers.Quat.from_pitch(np.pi / 24)
 )
 
 DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
     x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
 )
 
+DEFAULT_HAND_LOOK_INTO_POSE = math_helpers.SE3Pose(
+    x=0.80, y=0.0, z=0.3, rot=math_helpers.Quat.from_pitch(np.pi / 4)
+)
+
 direction_to_pose = {
     "DOWN": DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE,
     "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE,
+    "INTO": DEFAULT_HAND_LOOK_INTO_POSE
 }
 
 def gaze(robot: Robot, direction: str) -> None:
@@ -374,31 +379,6 @@ def draw_colored_pixels(image_pil: Image, pixels: list[Tuple[int, int]], path: s
                 py = min(max(pixel[1] + dy, 0), image_pil.height - 1)
                 pixels_obj[px, py] = (255, 0, 0) if color == "red" else (0, 0, 255)
     image_pil.save(path)
-
-
-DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=-0.15, rot=math_helpers.Quat.from_pitch(0)
-)
-
-DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
-)
-
-DEFAULT_HAND_LOOK_INTO_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.3, rot=math_helpers.Quat.from_pitch(np.pi / 4)
-)
-
-direction_to_pose = {
-    "DOWN": DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE,
-    "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE,
-    "INTO": DEFAULT_HAND_LOOK_INTO_POSE
-}
-
-def gaze(robot: Robot, direction: str) -> None:
-    """Move the hand to look in a certain direction."""
-    look_pose = direction_to_pose[direction]
-    move_hand_to_relative_pose(robot, look_pose)
-    open_gripper(robot)
 
 
 def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
