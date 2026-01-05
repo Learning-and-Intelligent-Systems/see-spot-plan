@@ -59,7 +59,7 @@ DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
 )
 
 DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
+    x=0.80, y=0.0, z=0.35, rot=math_helpers.Quat.from_pitch(np.pi / 2)
 )
 
 direction_to_pose = {
@@ -459,13 +459,13 @@ def push_button(
     if surface == "horizontal":
         tip_down_rot = DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE.rot
         approach = math_helpers.SE3Pose(
-            x=float(press_point_body[0]),
+            x=float(press_point_body[0]+0.02),
             y=float(press_point_body[1]),
             z=float(press_point_body[2] + z_clearance),
             rot=tip_down_rot,
         )
         press = math_helpers.SE3Pose(
-            x=float(press_point_body[0]),
+            x=float(press_point_body[0]+0.02),
             y=float(press_point_body[1]),
             z=float(press_point_body[2] + press_depth),
             rot=tip_down_rot,
