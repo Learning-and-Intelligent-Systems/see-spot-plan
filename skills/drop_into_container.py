@@ -1,5 +1,6 @@
 import rerun as rr
 import argparse
+import time
 
 from typing import List, Tuple, Optional
 import json
@@ -22,8 +23,7 @@ from bosdyn.client.util import authenticate
 from spot_utils.utils import verify_estop
 from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 from spot_utils.perception.spot_cameras import _image_response_to_image
-from iphone_kiwi_receiver import KiwiReceiver
-from calibrate_iphone import rgbd_to_point_cloud
+from calibrate_iphone import rgbd_to_point_cloud, ThreadedKiwiReceiver
 
 from skills.spot_hand_move import (
     move_hand_to_relative_pose,
@@ -300,9 +300,13 @@ def drop_into_container(
     # 1) Move arm so iPhone can see the container clearly
     gaze_without_open(robot, "DOWN")
 
-    # 2) Receive RGBD from iPhone
-    receiver = KiwiReceiver()
-    frame = receiver.recv_frame()
+    # 2) Receive RGBD from iPhone using threaded receiver
+    receiver = ThreadedKiwiReceiver()
+    time.sleep(1)
+    frame = receiver.get_latest_frame()
+    if frame is None:
+        raise RuntimeError("No iPhone frame received yet. Ensure iPhone is streaming.")
+
     rgb_img = frame.rgb
     depth_img = frame.depth
     if depth_img is None:

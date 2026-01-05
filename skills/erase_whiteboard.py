@@ -4,6 +4,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+import time
 
 import cv2
 import numpy as np
@@ -28,8 +29,7 @@ from skills.spot_hand_move import (
     close_gripper,
     stow_arm,
 )
-from iphone_kiwi_receiver import KiwiReceiver
-from calibrate_iphone import rgbd_to_point_cloud
+from calibrate_iphone import rgbd_to_point_cloud, ThreadedKiwiReceiver
 
 rr.init("erase_whiteboard", spawn=True)
 
@@ -58,7 +58,7 @@ DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
 )
 
 DEFAULT_HAND_LOOK_AT_WALL_POSE = math_helpers.SE3Pose(
-    x=0.55, y=0.0, z=0.6, rot=math_helpers.Quat.from_pitch(0)
+    x=0.55, y=0.0, z=0.5, rot=math_helpers.Quat.from_pitch(0)
 )
 
 direction_to_pose = {
@@ -67,8 +67,7 @@ direction_to_pose = {
     "WALL": DEFAULT_HAND_LOOK_AT_WALL_POSE
 }
 
-# TODO: check if this z offset is correct
-DEFAULT_WIPE_ONLINE_Z_OFFSET = 0.05
+DEFAULT_WIPE_ONLINE_Z_OFFSET = 0.02
 
 
 DEFAULT_WIPE_VLM_QUERY_TEMPLATE = (
@@ -562,15 +561,22 @@ def wipe_online(
     expand_percentage: float = 0.0,
     iphone_extrinsics_path: str = DEFAULT_IPHONE_EXTRINSICS_PATH,
 ) -> None:
+    
     # stow the arm
     stow_arm(robot)
 
-    # have the robot look up to look at the whiteboard 
+    # have the robot look up to look at the whiteboard
     gaze_without_open(robot, "WALL")
-    
-    # Capture an RGBD frame from the iPhone
-    receiver = KiwiReceiver()
-    frame = receiver.recv_frame()
+
+    # Capture an RGBD frame from the iPhone using threaded receiver
+    # By now, the background thread has had time to drain any buffered frames
+
+    receiver = ThreadedKiwiReceiver()
+    time.sleep(1)
+    frame = receiver.get_latest_frame()
+    if frame is None:
+        raise RuntimeError("No iPhone frame received yet. Ensure iPhone is streaming.")
+
     rgb_img = frame.rgb  # HxWx3 RGB (full resolution)
     depth_img = frame.depth  # HxW float32 (typically lower resolution)
     if depth_img is None:
@@ -641,9 +647,7 @@ def wipe_online(
     T_body_iphone = (T_body_approach_body_retreat @ T_body_retreat_iphone).astype(np.float64)
 
     # Point cloud in iPhone camera frame
-    print(f"[DEBUG] Depth stats: min={depth_img.min():.3f}, max={depth_img.max():.3f}, mean={depth_img.mean():.3f}")
     points, colors = rgbd_to_point_cloud(rgb_img, depth_img, K_iphone)
-    print(f"[DEBUG] Point cloud in camera frame - Z stats: min={points[:, 2].min():.3f}, max={points[:, 2].max():.3f}")
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points.astype(np.float32))
     pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float32))
@@ -667,10 +671,6 @@ def wipe_online(
         points_body = points_body_h[:, :3].astype(np.float32)
     else:
         points_body = points_cam
-
-    print(f"[DEBUG] Point cloud in BODY frame - X: [{points_body[:, 0].min():.3f}, {points_body[:, 0].max():.3f}], "
-          f"Y: [{points_body[:, 1].min():.3f}, {points_body[:, 1].max():.3f}], "
-          f"Z: [{points_body[:, 2].min():.3f}, {points_body[:, 2].max():.3f}]")
 
     # Log the 3D points in BODY frame
     rr.log('scene/points3d_body', rr.Points3D(positions=points_body, colors=colors, radii=voxel_size/2))
@@ -735,8 +735,6 @@ def wipe_online(
         spacing_m=0.05,
         max_stroke_len=0.35,
     )
-
-    print(f"[DEBUG] Wipe start pose in BODY frame: x={wipe_start_pose.x:.3f}, y={wipe_start_pose.y:.3f}, z={wipe_start_pose.z:.3f}")
 
     ## move the hand to the bottom-right position of the bounding box
     # Compute target pose from bbox using iPhone geometry
@@ -838,13 +836,6 @@ def main() -> None:
         help="Spot hostname/IP (e.g., 192.168.80.3)",
     )
     parser.add_argument(
-        "--iphone_extrinsics",
-        type=str,
-        required=False,
-        default=DEFAULT_IPHONE_EXTRINSICS_PATH,
-        help="Path to extrinsics JSON containing key T_hand_iphone (hand-camera<-iphone).",
-    )
-    parser.add_argument(
         "--expand_percentage",
         type=float,
         default=0.0,
@@ -858,8 +849,7 @@ def main() -> None:
         lease_client,
         lease_keepalive,
         localizer=None,
-        expand_percentage=args.expand_percentage,
-        iphone_extrinsics_path=args.iphone_extrinsics,
+        expand_percentage=args.expand_percentage
     )
 
 if __name__ == "__main__":

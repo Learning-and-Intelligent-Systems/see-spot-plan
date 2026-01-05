@@ -4,6 +4,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+import time
 
 import cv2
 import numpy as np
@@ -27,8 +28,7 @@ from skills.spot_hand_move import (
     close_gripper,
     stow_arm,
 )
-from iphone_kiwi_receiver import KiwiReceiver
-from calibrate_iphone import rgbd_to_point_cloud
+from calibrate_iphone import rgbd_to_point_cloud, ThreadedKiwiReceiver
 
 rr.init("wipe_online_iphone", spawn=True)
 
@@ -53,7 +53,7 @@ DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
 )
 
 DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
+    x=0.80, y=0.0, z=0.35, rot=math_helpers.Quat.from_pitch(np.pi / 2)
 )
 
 direction_to_pose = {
@@ -81,7 +81,7 @@ DEFAULT_WIPE_VLM_QUERY_TEMPLATE = (
 )
 
 DEFAULT_SPOT_HAND_CAMERA_NAME = "hand_color_image"
-DEFAULT_IPHONE_EXTRINSICS_PATH = str((Path(__file__).resolve().parents[1] / "iphone_extrinsic.json"))
+DEFAULT_IPHONE_EXTRINSICS_PATH = str((Path(__file__).resolve().parents[1] / "iphone_extrinsics.json"))
 
 
 def _load_T_hand_iphone(extrinsics_path: str) -> np.ndarray:
@@ -771,16 +771,22 @@ def wipe_online(
     expand_percentage: float = 0.0,
     iphone_extrinsics_path: str = DEFAULT_IPHONE_EXTRINSICS_PATH,
 ) -> None:
+
     # stow the arm
     stow_arm(robot)
-    # have the robot look ahead to look at the spill 
+    # have the robot look ahead to look at the spill
     # gaze(robot, "AHEAD")
     gaze_without_open(robot, "DOWN")
     # gaze(robot, "DOWN")
-    
-    # Capture an RGBD frame from the iPhone
-    receiver = KiwiReceiver()
-    frame = receiver.recv_frame()
+
+    # By now, the background thread has had time to drain any buffered frames
+    # Get the latest fresh frame from the iPhone
+    receiver = ThreadedKiwiReceiver()
+    time.sleep(1)
+    frame = receiver.get_latest_frame()
+    if frame is None:
+        raise RuntimeError("No iPhone frame received yet. Ensure iPhone is streaming.")
+
     rgb_img = frame.rgb  # HxWx3 RGB (full resolution)
     depth_img = frame.depth  # HxW float32 (typically lower resolution)
     if depth_img is None:
@@ -1009,7 +1015,7 @@ def wipe_online(
                 radii=0.005,
             ),
         )
-    
+
     # Run multi-stroke wipe
     wipe_multiple_strokes(
         robot=robot,
@@ -1032,19 +1038,6 @@ def main() -> None:
         help="Spot hostname/IP (e.g., 192.168.80.3)",
     )
     parser.add_argument(
-        "--iphone_extrinsics",
-        type=str,
-        required=False,
-        default=DEFAULT_IPHONE_EXTRINSICS_PATH,
-        help="Path to extrinsics JSON containing key T_hand_iphone (hand-camera<-iphone).",
-    )
-    parser.add_argument(
-        "--z_offset",
-        type=float,
-        default=0.08,
-        help="Hand Z offset above surface in meters (clearance).",
-    )
-    parser.add_argument(
         "--expand_percentage",
         type=float,
         default=0.0,
@@ -1052,16 +1045,13 @@ def main() -> None:
     )
     args = parser.parse_args()
     robot, lease_client, lease_keepalive = init_robot(args.hostname, "")
-    # rr.init("wipe_online", spawn=True)
     
     wipe_online(
         robot,
         lease_client,
         lease_keepalive,
         localizer=None,
-        z_offset=args.z_offset,
         expand_percentage=args.expand_percentage,
-        iphone_extrinsics_path=args.iphone_extrinsics,
     )
 
 if __name__ == "__main__":

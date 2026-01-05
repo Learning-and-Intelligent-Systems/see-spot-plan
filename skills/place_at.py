@@ -1,5 +1,6 @@
 import rerun as rr
 import argparse
+import time
 
 from typing import List, Tuple, Optional
 import json
@@ -22,8 +23,7 @@ from bosdyn.client.util import authenticate
 from spot_utils.utils import verify_estop
 from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 from spot_utils.perception.spot_cameras import _image_response_to_image
-from iphone_kiwi_receiver import KiwiReceiver
-from calibrate_iphone import rgbd_to_point_cloud
+from calibrate_iphone import rgbd_to_point_cloud, ThreadedKiwiReceiver
 
 from skills.spot_hand_move import (
     move_hand_to_relative_pose,
@@ -37,7 +37,7 @@ DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
 )
 
 DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
-    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 2)
+    x=0.80, y=0.0, z=0.35, rot=math_helpers.Quat.from_pitch(np.pi / 2)
 )
 
 direction_to_pose = {
@@ -150,7 +150,7 @@ def _iphone_pixel_to_body_xyz(
 
 DEFAULT_PLACE_VLM_QUERY_TEMPLATE = (
     "You are given an image of a tabletop scene. Return one point that lies on the surface of the table where an object can be placed.\n"
-    "Choose a placement point that does not lie on top of other objects/obstacles and is far away from the edge of the table."
+    "Choose a placement point that is far away from other objects/obstacles and is far away from the edge of the table."
     "OUTPUT FORMAT (return EXACTLY one JSON object in the FORMAT below and NOTHING ELSE):\n"
     '{"point": [y, x], "label": "open_table_region"}. '
     "Coordinates MUST be normalized to 0-1000.\n"
@@ -308,11 +308,16 @@ def place_at(
     rr.init("place_skill", spawn=True)
 
     # 1) Move arm so iPhone can see the table clearly
-    gaze_without_open(robot, "AHEAD")
+    gaze_without_open(robot, "DOWN")
 
-    # 2) Receive RGBD from iPhone
-    receiver = KiwiReceiver()
-    frame = receiver.recv_frame()
+    # 2) Receive RGBD from iPhone using threaded receiver
+    # By now, the background thread has had time to drain any buffered frames
+    receiver = ThreadedKiwiReceiver()
+    time.sleep(1)
+    frame = receiver.get_latest_frame()
+    if frame is None:
+        raise RuntimeError("No iPhone frame received yet. Ensure iPhone is streaming.")
+
     rgb_img = frame.rgb
     depth_img = frame.depth
     if depth_img is None:
@@ -423,7 +428,7 @@ def place_at(
     # 7) Move above, open gripper
     move_hand_to_relative_pose(robot, above_pose)
     open_gripper(robot)
-
+    stow_arm(robot)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Place at controller.")

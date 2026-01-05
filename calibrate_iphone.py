@@ -91,9 +91,10 @@ class ThreadedKiwiReceiver:
             return self._latest_frame
 
     def stop(self):
-        """Stop the background receiver thread."""
+        """Stop the background receiver thread and close the connection."""
         self._running = False
         self._thread.join(timeout=2.0)
+        self._receiver.close()
         print("[INFO] Stopped background iPhone frame receiver thread")
 
 
