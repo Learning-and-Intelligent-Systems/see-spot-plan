@@ -23,7 +23,8 @@ from bosdyn.client.util import authenticate
 from spot_utils.utils import verify_estop
 from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 from spot_utils.perception.spot_cameras import _image_response_to_image
-from calibrate_iphone import rgbd_to_point_cloud, ThreadedKiwiReceiver
+from calibrate_iphone import rgbd_to_point_cloud
+from iphone_streaming import get_latest_frame
 
 from skills.spot_hand_move import (
     move_hand_to_relative_pose,
@@ -310,11 +311,10 @@ def place_at(
     # 1) Move arm so iPhone can see the table clearly
     gaze_without_open(robot, "DOWN")
 
-    # 2) Receive RGBD from iPhone using threaded receiver
-    # By now, the background thread has had time to drain any buffered frames
-    receiver = ThreadedKiwiReceiver()
-    time.sleep(1)
-    frame = receiver.get_latest_frame()
+    # 2) Receive RGBD from iPhone using the shared streaming process
+    # Get the latest frame from the streaming process (must be started before running this skill)
+    time.sleep(0.5)
+    frame = get_latest_frame()
     if frame is None:
         raise RuntimeError("No iPhone frame received yet. Ensure iPhone is streaming.")
 

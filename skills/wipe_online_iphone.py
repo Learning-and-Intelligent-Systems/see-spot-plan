@@ -28,7 +28,8 @@ from skills.spot_hand_move import (
     close_gripper,
     stow_arm,
 )
-from calibrate_iphone import rgbd_to_point_cloud, ThreadedKiwiReceiver
+from calibrate_iphone import rgbd_to_point_cloud
+from iphone_streaming import get_latest_frame
 
 rr.init("wipe_online_iphone", spawn=True)
 
@@ -779,11 +780,10 @@ def wipe_online(
     gaze_without_open(robot, "DOWN")
     # gaze(robot, "DOWN")
 
-    # By now, the background thread has had time to drain any buffered frames
-    # Get the latest fresh frame from the iPhone
-    receiver = ThreadedKiwiReceiver()
-    time.sleep(1)
-    frame = receiver.get_latest_frame()
+    # Get the latest frame from the shared streaming process
+    # (must be started before running this skill)
+    time.sleep(0.5)
+    frame = get_latest_frame()
     if frame is None:
         raise RuntimeError("No iPhone frame received yet. Ensure iPhone is streaming.")
 
