@@ -11,6 +11,7 @@ import argparse
 from typing import Dict, Optional
 
 import numpy as np
+import rerun as rr
 import yaml
 from bosdyn.client import create_standard_sdk, math_helpers
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
@@ -27,8 +28,12 @@ from skills.spot_hand_move import (
 from skills.wipe import wipe_multiple_strokes
 # from skills.wipe_online import wipe_online as run_wipe_online
 from skills.wipe_online_iphone import wipe_online as run_wipe_online
-from skills.push_button import push_button as run_push_button
+from skills.erase_whiteboard import wipe_online as run_erase_whiteboard
+from skills.push_button_iphone import push_button_iphone as run_push_button
 from skills.open_cabinet import open_drawer as run_open_drawer
+from skills.close_cabinet import close_drawer as run_close_drawer
+from skills.place_at import place_at as run_place_at
+from skills.drop_into_container import drop_into_container as run_drop_into_container
 from skills.spot_navigation import navigate_to_absolute_pose
 from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
@@ -74,6 +79,10 @@ def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
     global LOCALIZER
     global ROBOT
     global SAM_ENDPOINT
+
+    # Initialize Rerun for visualization
+    rr.init("spot_plan_execution", spawn=True)
+
     sdk = create_standard_sdk("NavigationSkillTestClient")
     ROBOT = sdk.create_robot(hostname)
     authenticate(ROBOT)
@@ -134,36 +143,32 @@ def grasp_at_pose(X_RobEE: NDArray) -> None:
     move_hand_to_relative_pose(ROBOT, DEFAULT_HAND_LOOK_FLOOR_POSE)
 
 
-def place_at_pose(X_RobEE: NDArray) -> None:
-    """Place an object at a specified xyz position with a top-down approach.
+def place_at_pose(z_above_surface_m: float = 0.1) -> None:
+    """Place an object using VLM-guided placement.
 
-    The first three entries of X_RobEE are interpreted as (x, y, z) in the
-    robot body frame. Any additional entries (e.g. quaternion components) are
-    ignored for placement. A fixed positional offset of (0, 0, 0.05) meters in
-    the body frame is applied so the hand stops slightly above the nominal
-    target position. The orientation is set to a fixed top-down pose so that
-    the arm motion is simple and predictable, independent of any orientation
-    passed in.
+    Uses the iPhone camera and Gemini VLM to find an open region on a table
+    surface, then places the currently held object there.
+
+    Args:
+        z_above_surface_m: Height above the detected surface to release the
+            object. Defaults to 0.1 meters.
     """
-    assert ROBOT is not None
-    # Interpret the input as an xyz position in the body frame.
-    x, y, z = X_RobEE[0], X_RobEE[1], X_RobEE[2]
-    # Fixed positional offset (dx, dy, dz) expressed in the body frame.
-    dx, dy, dz = 0.0, 0.0, 0.05
-    # Use the same "straight down" orientation used elsewhere for looking down.
-    top_down_rot = DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE.rot
-    # Apply the offset directly in the body frame so that positive dz moves
-    # the hand upward relative to the robot body.
-    place_pose = math_helpers.SE3Pose(
-        x=x + dx,
-        y=y + dy,
-        z=z + dz,
-        rot=top_down_rot,
-    )
-    # Move to the placement pose, open the gripper to release, then the plan
-    # can decide when to stow the arm.
-    move_hand_to_relative_pose(ROBOT, place_pose)
-    open_gripper(ROBOT)
+    assert ROBOT is not None, "Robot is not initialized; call init(...) first."
+    run_place_at(ROBOT, z_above_surface_m=z_above_surface_m)
+
+
+def drop(z_above_surface_m: float = 0.3) -> None:
+    """Drop an object into a container using VLM-guided placement.
+
+    Uses the iPhone camera and Gemini VLM to find an open region in a container,
+    then drops the currently held object there.
+
+    Args:
+        z_above_surface_m: Height above the detected surface to release the
+            object. Defaults to 0.1 meters.
+    """
+    assert ROBOT is not None, "Robot is not initialized; call init(...) first."
+    run_drop_into_container(ROBOT, z_above_surface_m=z_above_surface_m)
 
 
 def vertical_wipe(
@@ -194,6 +199,26 @@ def wipe_at(*args, **kwargs) -> None:
     )
 
 
+def erase(vlm_query_template: Optional[str] = None) -> None:
+    """Erase a whiteboard using the iPhone-driven erase skill.
+
+    Args:
+        vlm_query_template: If provided, overrides the default VLM prompt used to
+            identify writing on the whiteboard.
+    """
+    extra_kwargs = {}
+    if vlm_query_template is not None:
+        extra_kwargs["vlm_query_template"] = vlm_query_template
+
+    run_erase_whiteboard(
+        ROBOT,
+        None,
+        None,
+        LOCALIZER,
+        **extra_kwargs,
+    )
+
+
 def press_button(text_prompt: Optional[str]) -> None:
     """Identify a button and push it using the hand camera.
 
@@ -203,7 +228,6 @@ def press_button(text_prompt: Optional[str]) -> None:
     if ROBOT is not None and LOCALIZER is not None:
         run_push_button(
             ROBOT,
-            LOCALIZER,
             label=label,
         )
 
@@ -227,6 +251,27 @@ def open_cabinet_drawer(
         standoff_dist=standoff_dist,
         body_height_offset=body_height_offset,
         retreat_offset=retreat_offset,
+    )
+
+def close_cabinet_drawer(
+    standoff_dist: float = 0.8,
+    body_height_offset: float = 0.0,
+    advance_offset: float = 0.4,
+) -> None:
+    """Close a drawer using the high-level close_drawer skill.
+
+    This delegates to ``skills.close_drawer.close_drawer``, passing the
+    initialized global ``ROBOT`` and ``LOCALIZER``.
+    """
+    assert ROBOT is not None, "Robot is not initialized; call init(...) first."
+    assert LOCALIZER is not None, "Localizer is not initialized; call init(...) first."
+
+    run_close_drawer(
+        ROBOT,
+        LOCALIZER,
+        standoff_dist=standoff_dist,
+        body_height_offset=body_height_offset,
+        advance_offset=advance_offset,
     )
 
 
