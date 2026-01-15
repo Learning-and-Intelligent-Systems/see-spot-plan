@@ -49,9 +49,6 @@ from spot_utils.utils import verify_estop
 from iphone_kiwi_receiver import KiwiReceiver
 
 
-rr.init("calibrate_iphone", spawn=True)
-
-
 class ThreadedKiwiReceiver:
     """Wrapper around KiwiReceiver that continuously drains frames in a background thread.
 
@@ -996,4 +993,5 @@ python calibrate_iphone.py solve --samples_json /home/ubuntu/calib_data/samples.
 """
 
 if __name__ == "__main__":
+    rr.init("calibrate_iphone", spawn=True)
     main()
