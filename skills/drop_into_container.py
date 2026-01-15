@@ -140,8 +140,7 @@ def _iphone_pixel_to_body_xyz(
 
 
 DEFAULT_PLACE_VLM_QUERY_TEMPLATE = (
-    "You are given an image of a container. Return one point that lies on the surface of the inside of the container where an object can be placed."
-    "Choose a placement point that does not lie on top of other objects/obstacles and is far away from the edges of the container."
+    "You are given an image of a surface. Return a point on the surface that's away from the walls of the container where an object can be placed."
     "OUTPUT FORMAT (return EXACTLY one JSON object in the FORMAT below and NOTHING ELSE):\n"
     '{"point": [y, x], "label": "open_container_region"}. '
     "Coordinates MUST be normalized to 0-1000.\n"
@@ -283,7 +282,7 @@ def drop_into_container(
     robot,
     iphone_extrinsics_path: str = DEFAULT_IPHONE_EXTRINSICS_PATH,
     vlm_query_template: str = DEFAULT_PLACE_VLM_QUERY_TEMPLATE,
-    z_above_surface_m: float = 0.1,
+    z_above_surface_m: float = 0.3,
     save_debug_images: bool = True,
 ) -> None:
     """
