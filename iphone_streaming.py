@@ -134,13 +134,14 @@ def stop_streaming() -> None:
     print("[INFO] iPhone streaming stopped successfully")
 
 
-def get_latest_frame(timeout: float = 5.0) -> IphoneFrame:
+def get_latest_frame(timeout: float = 5.0, max_age: float = 2.0) -> IphoneFrame:
     """Get the latest frame from the streaming receiver.
 
     This reads from the shared frame file updated by the streaming process.
 
     Args:
         timeout: Maximum time to wait for a frame if streaming just started
+        max_age: Maximum age of frame in seconds before it's considered stale
 
     Returns:
         The latest IphoneFrame
@@ -163,6 +164,16 @@ def get_latest_frame(timeout: float = 5.0) -> IphoneFrame:
                 "Streaming may have just started, try again."
             )
         time.sleep(0.1)
+
+    # Check frame freshness
+    frame_age = time.time() - _FRAME_FILE.stat().st_mtime
+    if frame_age > max_age:
+        raise RuntimeError(
+            f"Frame is {frame_age:.1f}s old (max allowed: {max_age}s). "
+            "The iPhone may have stopped streaming. Restart with:\n"
+            "  python iphone_streaming.py stop\n"
+            "  python iphone_streaming.py start"
+        )
 
     # Read the latest frame
     try:
