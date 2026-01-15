@@ -32,7 +32,6 @@ from skills.spot_hand_move import (
 from calibrate_iphone import rgbd_to_point_cloud
 from iphone_streaming import get_latest_frame
 
-rr.init("erase_whiteboard", spawn=True)
 
 def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseKeepAlive]:
     sdk = create_standard_sdk("WipeOnlineClient")
@@ -852,4 +851,5 @@ def main() -> None:
     )
 
 if __name__ == "__main__":
+    rr.init("erase_whiteboard", spawn=True)
     main()

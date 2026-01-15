@@ -31,7 +31,6 @@ from datetime import datetime
 from PIL import Image
 import open3d as o3d
 
-rr.init("wipe_online", spawn=True)
 
 def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseKeepAlive, SpotLocalizer]:
     sdk = create_standard_sdk("WipeOnlineClient")
@@ -800,4 +799,5 @@ The coordinates are in [ymin, xmin, ymax, xmax] format normalized to 0-1000."""
     )
 
 if __name__ == "__main__":
+    rr.init("wipe_online", spawn=True)
     main()

@@ -31,7 +31,6 @@ from skills.spot_hand_move import (
 from calibrate_iphone import rgbd_to_point_cloud
 from iphone_streaming import get_latest_frame
 
-rr.init("wipe_online_iphone", spawn=True)
 
 def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseKeepAlive]:
     sdk = create_standard_sdk("WipeOnlineClient")
@@ -257,7 +256,7 @@ def _compute_wipe_params_from_bbox_iphone(
         float(side_dir[0] * spacing_m),
         float(side_dir[1] * spacing_m),
     )
-    num_strokes = max(1, int(np.ceil(width_m / max(spacing_m, 1e-3))) + 1)
+    num_strokes = max(1, int(np.ceil(width_m / max(spacing_m, 1e-3))))
 
     end_look_pose = math_helpers.SE3Pose(
         x=0.65,
@@ -1055,4 +1054,5 @@ def main() -> None:
     )
 
 if __name__ == "__main__":
+    rr.init("wipe_online_iphone", spawn=True)
     main()
