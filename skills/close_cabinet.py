@@ -18,7 +18,7 @@ from skills.grasp import grasp_at_pixel
 from skills.spot_hand_move import open_gripper, stow_arm
 from skills.spot_navigation import navigate_to_relative_pose
 
-from open_cabinet import (
+from .open_cabinet import (
     compute_body_pose_in_front_of_drawer,
     draw_colored_pixels,
     fit_plane_to_points,
@@ -44,9 +44,17 @@ from open_cabinet import (
 # Return JSON of the form [{"point": [y, x], "label": "open_drawer_face"}] with coordinates normalized to 0-1000.
 # """
 
+# prompt_get_drawer_surface_pixel = """
+# You are looking at a cabinet with several drawers, and one of the drawers is open. 
+# Select exactly 5 points on the front face of the open drawer only, and avoid the green handle and the edges of the open drawer. 
+# You are looking at a cabinet with several drawers, but only one drawer is open and it has a dark green handle wrapped in tape.
+# Select exactly 5 points on the white front face of that one open drawer only, avoiding the dark green handle and the edges of the open drawer.
+# Return JSON of the form [{"point": [y, x], "label": "open_drawer_face"}] with coordinates normalized to 0-1000.
+# """
+
 prompt_get_drawer_surface_pixel = """
-You are looking at a cabinet with several drawers, but only one drawer is open and it has a dark green handle wrapped in tape.
-Select exactly 15 points on the white front face of that one open drawer only, avoiding the dark green handle and the edges of the open drawer.
+You are looking at a cabinet with several drawers, and one of the drawers is open. 
+Select exactly 15 points on the front face of the open drawer only, and avoid the green handle and the edges of the open drawer. 
 Return JSON of the form [{"point": [y, x], "label": "open_drawer_face"}] with coordinates normalized to 0-1000.
 """
 
@@ -123,10 +131,63 @@ def close_drawer(
 
     # Fit a plane to those points via SVD and get normal vector
     surface_centroid, normal_vector = fit_plane_to_points(front_surface_3d_points)
-    # print("NORMAL VECTOR IS: ", normal_vector)
+    print("NORMAL VECTOR IS: ", normal_vector)
+    print("SURFACE CENTROID IS: ", surface_centroid)
 
     # Log the normal vector as a 3D arrow from the centroid of surface points
     rr.log("drawer_normal", rr.Arrows3D(origins=surface_centroid, vectors=normal_vector * 0.3, colors=[0, 255, 0]))
+
+    # Visualize the fitted plane as a mesh
+    # Compute two orthogonal vectors in the plane
+    world_up = np.array([0, 0, 1])
+    if abs(np.dot(normal_vector, world_up)) > 0.9:
+        # Normal is too close to vertical, use a different reference
+        world_up = np.array([1, 0, 0])
+
+    # First tangent vector in the plane
+    tangent1 = np.cross(normal_vector, world_up)
+    tangent1 = tangent1 / np.linalg.norm(tangent1)
+
+    # Second tangent vector in the plane (orthogonal to both normal and tangent1)
+    tangent2 = np.cross(normal_vector, tangent1)
+    tangent2 = tangent2 / np.linalg.norm(tangent2)
+
+    # Create corners of the plane visualization around the centroid
+    # Make the plane 0.3m x 0.3m for visibility
+    plane_size = 0.3
+    corner_offsets = [
+        -tangent1 * plane_size/2 - tangent2 * plane_size/2,  # A: bottom-left
+        tangent1 * plane_size/2 - tangent2 * plane_size/2,   # B: bottom-right
+        tangent1 * plane_size/2 + tangent2 * plane_size/2,   # C: top-right
+        -tangent1 * plane_size/2 + tangent2 * plane_size/2,  # D: top-left
+    ]
+
+    plane_corners = np.array([surface_centroid + offset for offset in corner_offsets], dtype=np.float32)
+
+    # Log the plane corners as points
+    rr.log(
+        "fitted_plane/corners",
+        rr.Points3D(
+            positions=plane_corners,
+            colors=np.array([[255, 255, 0]] * 4, dtype=np.uint8),
+            radii=0.01,
+        ),
+    )
+
+    # Log the fitted plane as a mesh (two triangles forming a square)
+    rr.log(
+        "fitted_plane/mesh",
+        rr.Mesh3D(
+            vertex_positions=plane_corners,
+            triangle_indices=np.array([[0, 1, 2], [0, 2, 3]], dtype=np.uint32),
+            vertex_colors=np.array([[0, 255, 255, 100]] * 4, dtype=np.uint8),  # Semi-transparent cyan
+        ),
+    )
+
+    # Log the two tangent vectors as arrows from the centroid
+    rr.log("fitted_plane/tangent1", rr.Arrows3D(origins=surface_centroid, vectors=tangent1 * 0.15, colors=[255, 0, 255]))
+    rr.log("fitted_plane/tangent2", rr.Arrows3D(origins=surface_centroid, vectors=tangent2 * 0.15, colors=[255, 255, 0]))
+
     if checkpoint == 0:
         return None
 
