@@ -11,13 +11,19 @@ def _generate_proto():
 
 
 class PostInstall(install):
+    """Run proto generation after install."""
+
     def run(self):
+        """Run install and generate proto files."""
         super().run()
         _generate_proto()
 
 
 class PostDevelop(develop):
+    """Run proto generation after develop install."""
+
     def run(self):
+        """Run develop install and generate proto files."""
         super().run()
         _generate_proto()
 
