@@ -11,7 +11,7 @@ import os
 from io import BytesIO
 from typing import Collection, Dict, List, Optional, Union
 
-import google.generativeai as genai
+from google import genai
 import imagehash
 import openai
 import PIL.Image
@@ -262,8 +262,7 @@ class GoogleGeminiModel():
         self._model_name = model_name
         assert "GOOGLE_API_KEY" in os.environ
         print(f'Using Gemini API key: {os.getenv("GOOGLE_API_KEY")}')
-        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        self._model = genai.GenerativeModel(self._model_name)  # pylint:disable=no-member
+        self._client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 
 class OpenAILLM(LargeLanguageModel, OpenAIModel):
@@ -309,7 +308,7 @@ class OpenAILLM(LargeLanguageModel, OpenAIModel):
 
 
 class GoogleGeminiLLM(LargeLanguageModel, GoogleGeminiModel):
-    """Interface to the Google Gemini VLM (1.5).
+    """Interface to the Google Gemini LLM.
 
     Assumes that an environment variable GOOGLE_API_KEY is set with the
     necessary API key to query the particular model name.
@@ -327,12 +326,13 @@ class GoogleGeminiLLM(LargeLanguageModel, GoogleGeminiModel):
             num_completions: int = 1) -> List[str]:  # pragma: no cover
         del seed, stop_token  # unused
         assert imgs is None
-        generation_config = genai.types.GenerationConfig(  # pylint:disable=no-member
+        config = genai.types.GenerateContentConfig(
             candidate_count=num_completions,
             temperature=temperature)
-        response = self._model.generate_content(
-            [prompt], generation_config=generation_config)
-        response.resolve()
+        response = self._client.models.generate_content(
+            model=self._model_name,
+            contents=[prompt],
+            config=config)
         return [response.text]
 
     def get_id(self) -> str:
@@ -341,7 +341,7 @@ class GoogleGeminiLLM(LargeLanguageModel, GoogleGeminiModel):
 
 
 class GoogleGeminiVLM(VisionLanguageModel, GoogleGeminiModel):
-    """Interface to the Google Gemini VLM (1.5).
+    """Interface to the Google Gemini VLM.
 
     Assumes that an environment variable GOOGLE_API_KEY is set with the
     necessary API key to query the particular model name.
@@ -359,17 +359,17 @@ class GoogleGeminiVLM(VisionLanguageModel, GoogleGeminiModel):
             num_completions: int = 1) -> List[str]:  # pragma: no cover
         del seed, stop_token  # unused
         assert imgs is not None
-        generation_config = genai.types.GenerationConfig(  # pylint:disable=no-member
+        config = genai.types.GenerateContentConfig(
             candidate_count=num_completions,
             temperature=temperature)
-        logging.debug(f"GoogleGeminiVLM._sample_completions with config: {generation_config}")
+        logging.debug(f"GoogleGeminiVLM._sample_completions with config: {config}")
 
         try:
-            response = self._model.generate_content(
-                [prompt] + imgs,
-                generation_config=generation_config,
+            response = self._client.models.generate_content(
+                model=self._model_name,
+                contents=[prompt] + imgs,
+                config=config,
             )
-            response.resolve()
         except Exception as exc:  # pylint:disable=broad-except
             logging.error("Gemini VLM generate_content failed", exc_info=True)
             raise RuntimeError(f"Gemini VLM generate_content failed: {exc}") from exc

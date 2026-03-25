@@ -1,5 +1,7 @@
 __pycache__
 *.pyc
+*_pb2.py
+*_pb2_grpc.py
 .DS_Store
 .vscode
 *.egg-info
@@ -17,3 +19,4 @@ push_button_images/*
 calib_data/*
 wipe_with_pick_images/*
 cache-fixme/*
+.claude/*

@@ -1,6 +1,25 @@
 """Setup script."""
 
 from setuptools import find_packages, setup
+from setuptools.command.develop import develop
+from setuptools.command.install import install
+
+
+def _generate_proto():
+    from generate_proto import generate
+    generate()
+
+
+class PostInstall(install):
+    def run(self):
+        super().run()
+        _generate_proto()
+
+
+class PostDevelop(develop):
+    def run(self):
+        super().run()
+        _generate_proto()
 
 path_to_myproject = "."
 
@@ -20,7 +39,7 @@ setup(
         "open3d",
         "rerun-sdk",
         "pillow",
-        "google-generativeai",
+        "google-genai",
         "imagehash",
         "openai",
         "tenacity",
@@ -28,7 +47,9 @@ setup(
         "pydantic",
         "fastapi",
         "uvicorn",
+        "grpcio-tools",
     ],
     include_package_data=True,
+    cmdclass={"install": PostInstall, "develop": PostDevelop},
     extras_require={"develop": ["ruff==0.9.8", "ty"]},
 )
