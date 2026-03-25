@@ -333,6 +333,7 @@ class GoogleGeminiLLM(LargeLanguageModel, GoogleGeminiModel):
             model=self._model_name,
             contents=[prompt],
             config=config)
+        assert response.text is not None
         return [response.text]
 
     def get_id(self) -> str:
@@ -374,6 +375,7 @@ class GoogleGeminiVLM(VisionLanguageModel, GoogleGeminiModel):
             logging.error("Gemini VLM generate_content failed", exc_info=True)
             raise RuntimeError(f"Gemini VLM generate_content failed: {exc}") from exc
 
+        assert response.text is not None
         return [response.text]
 
     def get_id(self) -> str:
