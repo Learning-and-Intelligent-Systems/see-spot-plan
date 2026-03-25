@@ -1,5 +1,4 @@
-"""
-Calibrate external iPhone camera w.r.t. Spot body frame.
+"""Calibrate external iPhone camera w.r.t. Spot body frame.
 
 This script has two main modes:
 
@@ -33,20 +32,19 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import cv2
-import open3d as o3d
 import numpy as np
+import open3d as o3d
+import open3d.visualization
 import rerun as rr
-from bosdyn.api import image_pb2
-from bosdyn.client import create_standard_sdk, math_helpers
+from bosdyn.client import create_standard_sdk
 from bosdyn.client.frame_helpers import BODY_FRAME_NAME, get_a_tform_b
 from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.sdk import Robot
 from bosdyn.client.util import authenticate
 
+from iphone_kiwi_receiver import KiwiReceiver
 from spot_utils.perception.spot_cameras import _image_response_to_image
 from spot_utils.utils import verify_estop
-
-from iphone_kiwi_receiver import KiwiReceiver
 
 
 class ThreadedKiwiReceiver:
@@ -83,6 +81,7 @@ class ThreadedKiwiReceiver:
 
         Returns:
             The latest frame object from KiwiReceiver, or None if no frames received yet.
+
         """
         with self._lock:
             return self._latest_frame
@@ -114,6 +113,7 @@ def rgbd_to_point_cloud(
     Returns:
         points: Nx3 float32 array of 3D points in the camera frame.
         colors: Nx3 float32 array of RGB colors in [0, 1].
+
     """
     if depth.ndim == 3:
         depth = depth[:, :, 0]
@@ -184,6 +184,11 @@ class IphoneFrame:
     camera_matrix: List[List[float]]  # 3x3 intrinsics
     rgb: np.ndarray
     depth: Optional[np.ndarray]
+
+    @property
+    def intrinsics(self) -> List[List[float]]:
+        """Alias for camera_matrix, used by skill code."""
+        return self.camera_matrix
 
 
 @dataclass
@@ -386,6 +391,7 @@ def _detect_charuco_pose(
 
     Returns:
         (rvec, tvec) if successful, otherwise None.
+
     """
     if dist_coeffs is None:
         dist_coeffs = np.zeros((5, 1), dtype=np.float64)
@@ -625,6 +631,7 @@ def _solve_hand_eye(samples: List[CalibrationSample]) -> np.ndarray:
     Returns:
         T_hand_iphone: 4x4 transform matrix mapping points from iPhone frame
                        into the Spot hand camera frame.
+
     """
     if len(samples) < 2:
         raise ValueError("Need at least 2 calibration samples for hand–eye.")
@@ -893,6 +900,7 @@ def run_calibration(
 
 
 def main() -> None:
+    """Parse arguments and run data collection or calibration solving."""
     parser = argparse.ArgumentParser(
         description="Calibrate external iPhone camera w.r.t. Spot body frame."
     )
@@ -955,6 +963,7 @@ def main() -> None:
         run_calibration(samples_json_path, output_extrinsics_path)
 
 def get_point_cloud(dirpath: str, visualize: bool = False):
+    """Build a point cloud from iPhone RGB-D images and intrinsics."""
     # dirpath = "/Users/aditya/research/phd/code/spot/see-spot-plan/wipe_online_images_iphone"
     # rgb_image_path = os.path.join(dirpath, "rgb_20251203_155935.png")
     # depth_image_path = os.path.join(dirpath, "depth_20251203_154258.npy")
@@ -972,7 +981,9 @@ def get_point_cloud(dirpath: str, visualize: bool = False):
     depth_path = os.path.join(dirpath, "iphone_depth.npy")
     intrinsics_path = os.path.join(dirpath, "iphone_intrinsics.json")
     K = np.array(json.load(open(intrinsics_path))["K"], dtype=np.float64)
-    rgb = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
+    rgb_raw = cv2.imread(rgb_path)
+    assert rgb_raw is not None, f"Failed to read image: {rgb_path}"
+    rgb = cv2.cvtColor(rgb_raw, cv2.COLOR_BGR2RGB)
     depth = np.load(depth_path)
     points, colors = rgbd_to_point_cloud(rgb, depth, K)
     pcd = o3d.geometry.PointCloud()

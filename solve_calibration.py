@@ -1,6 +1,4 @@
-"""
-Load and visualize calibration samples from will_test1 directory.
-"""
+"""Load and visualize calibration samples from will_test1 directory."""
 
 from __future__ import annotations
 
@@ -97,6 +95,7 @@ def rgbd_to_point_cloud(
     Returns:
         points: Nx3 float32 array of 3D points in the camera frame.
         colors: Nx3 float32 array of RGB colors in [0, 1].
+
     """
     if depth.ndim == 3:
         depth = depth[:, :, 0]
@@ -157,6 +156,7 @@ def detect_and_visualize_charuco(
     Returns:
         annotated_image: Image with visualizations drawn
         detection_data: Tuple of (corners, charuco_corners, charuco_ids, rvec, tvec) if detected, None otherwise
+
     """
     # Set default visual types if not provided
     if visual_types is None:
@@ -232,6 +232,7 @@ def compute_relative_transform(
 
     Returns:
         T_cam1_cam2: 4x4 transformation matrix from camera1 to camera2
+
     """
     # Convert rvec to rotation matrices
     R1, _ = cv2.Rodrigues(rvec1)
@@ -262,13 +263,16 @@ def load_sample(sample_dir: Path, sample_idx: int) -> CalibrationSample:
 
     Returns:
         CalibrationSample with loaded data
+
     """
     # Load Spot frame
     spot_rgb_path = sample_dir / "spot_rgb.png"
     spot_depth_path = sample_dir / "spot_depth.png"
     spot_intrinsics_path = sample_dir / "spot_intrinsics.json"
 
-    spot_rgb = cv2.cvtColor(cv2.imread(str(spot_rgb_path)), cv2.COLOR_BGR2RGB)
+    spot_rgb_raw = cv2.imread(str(spot_rgb_path))
+    assert spot_rgb_raw is not None, f"Failed to read image: {spot_rgb_path}"
+    spot_rgb = cv2.cvtColor(spot_rgb_raw, cv2.COLOR_BGR2RGB)
     spot_depth = cv2.imread(str(spot_depth_path), cv2.IMREAD_UNCHANGED)
 
     with open(spot_intrinsics_path, "r") as f:
@@ -280,7 +284,9 @@ def load_sample(sample_dir: Path, sample_idx: int) -> CalibrationSample:
     iphone_depth_path = sample_dir / "iphone_depth.npy"
     iphone_intrinsics_path = sample_dir / "iphone_intrinsics.json"
 
-    iphone_rgb = cv2.cvtColor(cv2.imread(str(iphone_rgb_path)), cv2.COLOR_BGR2RGB)
+    iphone_rgb_raw = cv2.imread(str(iphone_rgb_path))
+    assert iphone_rgb_raw is not None, f"Failed to read image: {iphone_rgb_path}"
+    iphone_rgb = cv2.cvtColor(iphone_rgb_raw, cv2.COLOR_BGR2RGB)
     iphone_depth = np.load(str(iphone_depth_path))
 
     with open(iphone_intrinsics_path, "r") as f:
@@ -337,6 +343,7 @@ def load_all_samples(base_dir: Path) -> List[CalibrationSample]:
 
     Returns:
         List of CalibrationSample objects with loaded data
+
     """
     samples_json_path = base_dir / "samples.json"
 
@@ -366,6 +373,7 @@ def visualize_samples_with_rerun(samples: List[CalibrationSample]) -> None:
 
     Args:
         samples: List of CalibrationSample objects to visualize
+
     """
     rr.init("will_calibrate_iphone", spawn=True)
 
@@ -547,7 +555,7 @@ def visualize_samples_with_rerun(samples: List[CalibrationSample]) -> None:
         mean_translation = np.mean(translations, axis=0)
         std_translation = np.std(translations, axis=0)
 
-        print(f"\nTranslation (meters):")
+        print("\nTranslation (meters):")
         print(f"  Mean: [{mean_translation[0]:.4f}, {mean_translation[1]:.4f}, {mean_translation[2]:.4f}]")
         print(f"  Std:  [{std_translation[0]:.4f}, {std_translation[1]:.4f}, {std_translation[2]:.4f}]")
         print(f"  Max std component: {np.max(std_translation):.4f} m")
@@ -572,7 +580,7 @@ def visualize_samples_with_rerun(samples: List[CalibrationSample]) -> None:
             print(f"  Max angular error:  {max_angular_error:.3f} degrees")
 
         # Print individual transforms for inspection
-        print(f"\nIndividual transforms:")
+        print("\nIndividual transforms:")
         for idx, T in transforms:
             t = T[:3, 3]
             print(f"  Sample {idx}: t=[{t[0]:7.4f}, {t[1]:7.4f}, {t[2]:7.4f}]")
@@ -603,7 +611,7 @@ def visualize_samples_with_rerun(samples: List[CalibrationSample]) -> None:
         print(f"  Outliers removed: {len(outlier_indices)} samples")
 
         if outlier_indices:
-            print(f"\n  Removed samples:")
+            print("\n  Removed samples:")
             for i in outlier_indices:
                 idx, T = transforms[i]
                 t = T[:3, 3]
@@ -636,10 +644,10 @@ def visualize_samples_with_rerun(samples: List[CalibrationSample]) -> None:
             print(f"\nRobust average T_spot_iphone (from {len(inlier_indices)} inliers):")
             print(f"\n  Translation: [{avg_translation[0]:.6f}, {avg_translation[1]:.6f}, {avg_translation[2]:.6f}]")
             print(f"  Std (inliers): [{std_translation_inliers[0]:.6f}, {std_translation_inliers[1]:.6f}, {std_translation_inliers[2]:.6f}]")
-            print(f"\n  Rotation matrix:")
+            print("\n  Rotation matrix:")
             for row in avg_rotation:
                 print(f"    [{row[0]:9.6f}, {row[1]:9.6f}, {row[2]:9.6f}]")
-            print(f"\n  Full 4x4 matrix:")
+            print("\n  Full 4x4 matrix:")
             for row in T_spot_iphone_avg:
                 print(f"    [{row[0]:9.6f}, {row[1]:9.6f}, {row[2]:9.6f}, {row[3]:9.6f}]")
 
@@ -671,6 +679,7 @@ def visualize_accumulated_point_clouds(
         samples: List of CalibrationSample objects
         use_robust_average: If True, compute and use robust average T_spot_iphone.
                            If False, use per-frame transformations.
+
     """
     rr.init("will_calibrate_iphone_accumulated", spawn=True)
 

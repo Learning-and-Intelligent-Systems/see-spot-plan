@@ -7,34 +7,42 @@ three selection modes for the button location:
 3) Manual click from user
 """
 
-from typing import Optional, Literal, Tuple, List
-
+import argparse
 import json
-import numpy as np
-from PIL import Image, ImageDraw
-from bosdyn.client import math_helpers
-from bosdyn.client.sdk import Robot
-import cv2
 import os
 from datetime import datetime
-from spot_utils.spot_localization import SpotLocalizer
-from spot_utils.perception.spot_cameras import capture_images
+from typing import List, Literal, Optional, Tuple
+
+import cv2
+import numpy as np
+import rerun as rr
+from bosdyn.client import create_standard_sdk, math_helpers
+from bosdyn.client.frame_helpers import (
+    BODY_FRAME_NAME,
+    HAND_FRAME_NAME,
+    get_a_tform_b,
+)
+from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
+from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.client.sdk import Robot
+from bosdyn.client.util import authenticate
+from PIL import Image, ImageDraw
+
 from skills.spot_hand_move import (
+    close_gripper,
     move_hand_to_relative_pose,
     move_hand_to_relative_pose_with_velocity,
-    stow_arm,
     open_gripper,
-    close_gripper,
+    stow_arm,
 )
+from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.pretrained_model_interface import GoogleGeminiVLM
-from spot_utils.utils import verify_estop, get_graph_nav_dir
-from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
-from bosdyn.client.util import authenticate
-from bosdyn.client import create_standard_sdk
-import rerun as rr
-import argparse
+from spot_utils.spot_localization import SpotLocalizer
+from spot_utils.utils import get_graph_nav_dir, verify_estop
+
 
 def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseKeepAlive, SpotLocalizer]:
+    """Initialize the robot connection, authenticate, sync time, and localize."""
     sdk = create_standard_sdk("WipeOnlineClient")
     robot = sdk.create_robot(hostname)
     authenticate(robot)
@@ -75,6 +83,7 @@ def gaze(robot, direction: str) -> None:
 
 
 def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
+    """Back-project RGB and depth images into a 3D point cloud with colors."""
     rgb = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
     depth = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
 
@@ -269,14 +278,9 @@ def _pixel_to_camera_xyz(u: int, v: int, rgbd, intrinsics: Tuple[float, float, f
     y_cam = (v - cy) / fy * z
     return np.array([x_cam, y_cam, z], dtype=np.float32)
 
-from bosdyn.client.robot_state import RobotStateClient
-from bosdyn.client.frame_helpers import (
-    BODY_FRAME_NAME,
-    HAND_FRAME_NAME,
-    get_a_tform_b,
-)
 
 def get_current_hand_pose_body(robot):
+    """Return the current hand pose in the body frame as an SE3Pose."""
     robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
     robot_state = robot_state_client.get_robot_state()
 
@@ -309,6 +313,7 @@ def push_button(
         z_clearance: Approach standoff distance in meters
         press_depth: Distance above the button to press the button (to account for spot finger length)
         press_duration: Duration for press motion (s)
+
     """
     # 1) Prepare and capture
     stow_arm(robot)
@@ -316,7 +321,7 @@ def push_button(
     gaze(robot, "DOWN") ## this looks straight down at the button 
     ## this behavior changes if the button is on the wall
 
-    rgbd = capture_images(robot, localizer, camera_names=["hand_color_image"])  # type: ignore
+    rgbd = capture_images(robot, localizer, camera_names=["hand_color_image"])
     rgbd = rgbd["hand_color_image"]
     rgb = rgbd.rgb
     depth = rgbd.depth
@@ -365,7 +370,7 @@ def push_button(
     annotated_pil = pil.copy()
     if pixels:
         pixels_arr = np.array(pixels, dtype=np.float32)
-        # rr.log("image/button_pixels", rr.Points2D(positions=pixels_arr))
+        rr.log("image/button_pixels", rr.Points2D(positions=pixels_arr))
         annotated_pil = overlay_pixels_on_image(annotated_pil, pixels, color=(0, 0, 255), radius=3)
 
     # rr.log("image/button_center_pixel", rr.Points2D(positions=np.array([center_pixel], dtype=np.float32)))
@@ -512,6 +517,7 @@ def push_button(
     stow_arm(robot)
 
 def main():
+    """Parse arguments and run the push-button skill."""
     parser = argparse.ArgumentParser(description="Online wiping controller.")
     parser.add_argument(
         "--hostname",

@@ -1,7 +1,9 @@
+"""Utilities for querying Google Gemini VLM to extract pixel coordinates from images."""
+
 import json
 from typing import Tuple
 
-import PIL
+import PIL.Image
 
 from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 
@@ -9,6 +11,7 @@ from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 def get_pixel_from_gemini(
     vlm_query_str: str, pil_image: PIL.Image.Image
 ) -> Tuple[int, int]:
+    """Query Gemini VLM with an image and return the predicted pixel coordinates."""
     # Assuming create_vlm_by_name exists and works like create_llm_by_name
     # Use the specific model name from CFG or hardcode if necessary
     # vlm = GoogleGeminiVLM("gemini-1.5-flash")
@@ -72,10 +75,11 @@ def get_pixel_from_gemini(
 
 if __name__ == "__main__":
     import logging
-    import rerun as rr
-    from PIL import Image
+
     import cv2
     import numpy as np
+    import rerun as rr
+    from PIL import Image
 
 
     rr.init("gemini_test", spawn=True)

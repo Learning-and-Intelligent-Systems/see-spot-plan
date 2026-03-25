@@ -15,9 +15,9 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 import rerun as rr
-from PIL import Image
 from bosdyn.client import math_helpers
 from bosdyn.client.sdk import Robot
+from PIL import Image
 
 from skills.grasp import grasp_at_pixel
 from spot_utils.perception.spot_cameras import capture_images
@@ -32,7 +32,6 @@ def _get_pixel_from_gemini(vlm_query_str: str, pil_image: Image.Image) -> Tuple[
     This mirrors the usage pattern used in the wipe skill: construct a
     ``GoogleGeminiVLM`` instance and call ``sample_completions`` directly.
     """
-
     vlm = GoogleGeminiVLM("gemini-2.5-pro")
     print(f"Using Gemini VLM model: {vlm.get_id()}")
     print(f"Querying Gemini VLM with prompt: {vlm_query_str}")
@@ -139,6 +138,7 @@ def grasp_with_vlm(
         robot: The Spot ``Robot`` instance.
         localizer: The ``SpotLocalizer`` for the current map.
         text_prompt: Text description of the object to grasp (e.g., "red apple").
+
     """
     camera = "hand_color_image"
     print(f"Calling grasping with VLM for text prompt: {text_prompt}")

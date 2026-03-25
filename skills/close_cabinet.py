@@ -1,22 +1,28 @@
+"""Skill for closing an open cabinet drawer using Spot's arm."""
+
 import argparse
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
-from PIL import Image
-
+import rerun as rr
 from bosdyn.client import create_standard_sdk, math_helpers
+from bosdyn.client.frame_helpers import (
+    BODY_FRAME_NAME,
+    VISION_FRAME_NAME,
+    get_a_tform_b,
+    get_se2_a_tform_b,
+)
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.util import authenticate
-from bosdyn.client.frame_helpers import BODY_FRAME_NAME, ODOM_FRAME_NAME, HAND_FRAME_NAME, get_a_tform_b, VISION_FRAME_NAME, get_se2_a_tform_b
-from spot_utils.gemini_utils import get_pixel_from_gemini
-import rerun as rr
+from PIL import Image
 
-from spot_utils.utils import get_graph_nav_dir, verify_estop, get_robot_state
-from spot_utils.spot_localization import SpotLocalizer
-from spot_utils.perception.spot_cameras import capture_images
 from skills.grasp import grasp_at_pixel
 from skills.spot_hand_move import open_gripper, stow_arm
 from skills.spot_navigation import navigate_to_relative_pose
+from spot_utils.gemini_utils import get_pixel_from_gemini
+from spot_utils.perception.spot_cameras import capture_images
+from spot_utils.spot_localization import SpotLocalizer
+from spot_utils.utils import get_graph_nav_dir, get_robot_state, verify_estop
 
 from .open_cabinet import (
     compute_body_pose_in_front_of_drawer,
@@ -25,13 +31,11 @@ from .open_cabinet import (
     gaze,
     get_multiple_pixels_from_gemini,
     get_points_from_pixels,
-    pixels_to_vision_points,
-    prompt_get_handle_pixel,
-    set_body_height,
     move_hand_back,
     navigate_to_vision_goal,
+    pixels_to_vision_points,
+    prompt_get_handle_pixel,
 )
-
 
 # prompt_get_drawer_surface_pixel = """
 # You are looking at a cabinet with several drawers, but only one drawer is open and it has a green handle wrapped in tape.
@@ -67,6 +71,7 @@ def close_drawer(
     advance_offset: float = 0.4,
     checkpoint: int = 7,
 ) -> Optional[Image.Image]:
+    """Close an open cabinet drawer by pushing it shut with the robot arm."""
     # Retreat slightly to mirror the opening routine.
     retreat_pose = math_helpers.SE2Pose(-0.3, 0.0, 0.0)
     navigate_to_relative_pose(robot, retreat_pose)

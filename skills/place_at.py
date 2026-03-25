@@ -1,37 +1,34 @@
-import rerun as rr
+"""Skill to place an object at a target location using Spot's arm."""
+
 import argparse
-import time
-
-from typing import List, Tuple, Optional
 import json
-import numpy as np
-import cv2
-from PIL import Image
-from datetime import datetime
 import os
-from pathlib import Path
-import open3d as o3d
 import re
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional, Tuple
 
+import numpy as np
+import rerun as rr
 from bosdyn.client import create_standard_sdk, math_helpers
-from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.frame_helpers import BODY_FRAME_NAME, get_a_tform_b
-from bosdyn.client.sdk import Robot
+from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
+from bosdyn.client.sdk import Robot
 from bosdyn.client.util import authenticate
+from PIL import Image
 
-from spot_utils.utils import verify_estop
-from spot_utils.pretrained_model_interface import GoogleGeminiVLM
-from spot_utils.perception.spot_cameras import _image_response_to_image
 from calibrate_iphone import rgbd_to_point_cloud
 from iphone_streaming import get_latest_frame
-
 from skills.spot_hand_move import (
     move_hand_to_relative_pose,
-    move_hand_to_relative_pose_with_velocity,
     open_gripper,
     stow_arm,
 )
+from spot_utils.perception.spot_cameras import _image_response_to_image
+from spot_utils.pretrained_model_interface import GoogleGeminiVLM
+from spot_utils.utils import verify_estop
 
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
     x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
@@ -57,6 +54,7 @@ def gaze_without_open(robot, direction: str) -> None:
 
 
 def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseKeepAlive]:
+    """Initialize the robot connection, authenticate, and sync time."""
     sdk = create_standard_sdk("WipeOnlineClient")
     robot = sdk.create_robot(hostname)
     authenticate(robot)
@@ -159,8 +157,7 @@ DEFAULT_PLACE_VLM_QUERY_TEMPLATE = (
 
 
 def _parse_point_json(raw: str) -> Optional[Tuple[float, float]]:
-    """
-    Parse {"point": [y,x] | null} from Gemini output.
+    """Parse {"point": [y,x] | null} from Gemini output.
     Robust to:
       - ```json fences
       - stray text
@@ -180,8 +177,8 @@ def _parse_point_json(raw: str) -> Optional[Tuple[float, float]]:
             s = block.strip()
 
     # Extract first JSON-like object
-    l, r = s.find("{"), s.rfind("}")
-    s_obj = s[l:r + 1] if (l != -1 and r != -1 and r > l) else s
+    left, right = s.find("{"), s.rfind("}")
+    s_obj = s[left:right + 1] if (left != -1 and right != -1 and right > left) else s
 
     # Try strict JSON
     try:
@@ -226,8 +223,7 @@ def get_open_table_point_from_gemini(
     pil_image: Image.Image,
     model_name: str = "gemini-2.5-pro",
 ) -> Optional[Tuple[int, int]]:
-    """
-    Returns ONE point in RGB pixel coords: (v, u) where v=row(y), u=col(x).
+    """Returns ONE point in RGB pixel coords: (v, u) where v=row(y), u=col(x).
     Gemini returns normalized (0-1000) [y,x].
     """
     vlm = GoogleGeminiVLM(model_name)
@@ -296,16 +292,15 @@ def place_at(
     z_above_surface_m: float = 0.1,
     save_debug_images: bool = True,
 ) -> None:
-    """
-    Place an object onto a clear region of a table:
-      1) Move arm to look pose
-      2) Capture iPhone RGBD
-      3) Ask Gemini for ONE open-table point
-      4) Backproject to BODY
-      5) Move above that point
-      6) Open gripper
-    """
+    """Place an object onto a clear region of a table.
 
+    1) Move arm to look pose
+    2) Capture iPhone RGBD
+    3) Ask Gemini for ONE open-table point
+    4) Backproject to BODY
+    5) Move above that point
+    6) Open gripper
+    """
     rr.init("place_skill", spawn=True)
 
     # 1) Move arm so iPhone can see the table clearly
@@ -431,6 +426,7 @@ def place_at(
     stow_arm(robot)
 
 def main() -> None:
+    """Parse arguments and run the place-at skill."""
     parser = argparse.ArgumentParser(description="Place at controller.")
     parser.add_argument(
         "--hostname",

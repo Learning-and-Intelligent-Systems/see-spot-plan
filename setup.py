@@ -11,9 +11,7 @@ setup(
     install_requires=[
         "numpy>=1.23.5",
         "pytest==7.1.3",
-        "mypy==1.8.0",
         "pyyaml==6.0",
-        "pylint==2.14.5",
         "types-PyYAML",
         "bosdyn-client >= 3.1",
         "opencv-python >= 4.8.0",
@@ -32,5 +30,5 @@ setup(
         "uvicorn",
     ],
     include_package_data=True,
-    extras_require={"develop": ["ruff==0.9.8"]},
+    extras_require={"develop": ["ruff==0.9.8", "ty"]},
 )

@@ -18,29 +18,26 @@ from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.util import authenticate
 from numpy.typing import NDArray
 
+from skills.close_cabinet import close_drawer as run_close_drawer
+from skills.drop_into_container import drop_into_container as run_drop_into_container
+from skills.erase_whiteboard import wipe_online as run_erase_whiteboard
 from skills.grasp_vlm import grasp_with_vlm
+from skills.open_cabinet import open_drawer as run_open_drawer
+from skills.place_at import place_at as run_place_at
+from skills.push_button import push_button as run_push_button
 from skills.spot_hand_move import (
     close_gripper,
     move_hand_to_relative_pose,
     open_gripper,
-    stow_arm,
 )
+from skills.spot_navigation import navigate_to_absolute_pose
 from skills.wipe import wipe_multiple_strokes
+
 # from skills.wipe_online import wipe_online as run_wipe_online
 from skills.wipe_online_iphone import wipe_online as run_wipe_online
-from skills.erase_whiteboard import wipe_online as run_erase_whiteboard
-from skills.push_button_iphone import push_button_iphone as run_push_button
-from skills.open_cabinet import open_drawer as run_open_drawer
-from skills.close_cabinet import close_drawer as run_close_drawer
-from skills.place_at import place_at as run_place_at
-from skills.drop_into_container import drop_into_container as run_drop_into_container
-from skills.spot_navigation import navigate_to_absolute_pose
-from spot_utils.perception.spot_cameras import capture_images
 from spot_utils.spot_localization import SpotLocalizer
 from spot_utils.utils import (
     get_graph_nav_dir,
-    get_pixel_from_grounded_sam,
-    get_pixel_from_user,
     verify_estop,
 )
 
@@ -66,6 +63,7 @@ SPOT_ROOM_POSE: Dict[str, float] = dict()
 
 
 def np_pose_to_SE3(X_RobEE: NDArray) -> math_helpers.SE3Pose:
+    """Convert a numpy pose array to a Spot SDK SE3Pose."""
     return math_helpers.SE3Pose(
         X_RobEE[0],
         X_RobEE[1],
@@ -122,7 +120,7 @@ def gaze(direction: str) -> None:
     open_gripper(ROBOT)
 
 def gaze_without_open(direction: str) -> None:
-    """ Move the hand to look in a certain direction without opening the gripper."""
+    """Move the hand to look in a certain direction without opening the gripper."""
     look_pose = direction_to_pose[direction]
     move_hand_to_relative_pose(ROBOT, look_pose)
 
@@ -152,6 +150,7 @@ def place_at_pose(z_above_surface_m: float = 0.1) -> None:
     Args:
         z_above_surface_m: Height above the detected surface to release the
             object. Defaults to 0.1 meters.
+
     """
     assert ROBOT is not None, "Robot is not initialized; call init(...) first."
     run_place_at(ROBOT, z_above_surface_m=z_above_surface_m)
@@ -166,6 +165,7 @@ def drop(z_above_surface_m: float = 0.3) -> None:
     Args:
         z_above_surface_m: Height above the detected surface to release the
             object. Defaults to 0.1 meters.
+
     """
     assert ROBOT is not None, "Robot is not initialized; call init(...) first."
     run_drop_into_container(ROBOT, z_above_surface_m=z_above_surface_m)
@@ -205,6 +205,7 @@ def erase(vlm_query_template: Optional[str] = None) -> None:
     Args:
         vlm_query_template: If provided, overrides the default VLM prompt used to
             identify writing on the whiteboard.
+
     """
     extra_kwargs = {}
     if vlm_query_template is not None:

@@ -36,6 +36,7 @@ def _image_response_to_image(
         img = img.reshape(raw_image.rows, raw_image.cols)
     else:
         img = cv2.imdecode(img, -1)
+        assert img is not None, "Failed to decode image from buffer"
 
     # Convert BGR to RGB.
     if pixel_format in [

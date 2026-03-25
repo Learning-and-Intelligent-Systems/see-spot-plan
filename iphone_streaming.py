@@ -1,5 +1,4 @@
-"""
-Persistent iPhone streaming receiver manager with inter-process support.
+"""Persistent iPhone streaming receiver manager with inter-process support.
 
 This module provides a streaming receiver that can persist across multiple
 script executions by using file-based inter-process communication.
@@ -29,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from calibrate_iphone import ThreadedKiwiReceiver, IphoneFrame
+from calibrate_iphone import IphoneFrame, ThreadedKiwiReceiver
 
 # File paths for inter-process communication
 _STREAM_DIR = Path("/tmp/iphone_stream")
@@ -148,6 +147,7 @@ def get_latest_frame(timeout: float = 5.0, max_age: float = 2.0) -> IphoneFrame:
 
     Raises:
         RuntimeError: If streaming is not active or no frame is available
+
     """
     if not is_streaming_active():
         raise RuntimeError(
@@ -188,6 +188,7 @@ class StreamingManager:
     """Context manager to ensure streaming is active and provide helpful errors."""
 
     def __enter__(self):
+        """Enter the context manager and verify streaming is active."""
         if not is_streaming_active():
             print(
                 "[ERROR] iPhone streaming is not active!\n"
@@ -198,6 +199,7 @@ class StreamingManager:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit the context manager."""
         pass  # Don't stop streaming on exit
 
 

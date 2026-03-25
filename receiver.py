@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""
-Kiwi Frame Receiver
-Receives ARKit frame bundles from the Kiwi iOS app over TCP
-Uses Protocol Buffers for efficient binary serialization
+"""Kiwi Frame Receiver.
+
+Receives ARKit frame bundles from the Kiwi iOS app over TCP.
+Uses Protocol Buffers for efficient binary serialization.
 """
 
 import socket
 import struct
-import numpy as np
-from PIL import Image
-from io import BytesIO
-import rerun as rr
-
 from datetime import datetime
+from io import BytesIO
+
+import numpy as np
+import rerun as rr
+from PIL import Image
+
 from frame_bundle_pb2 import FrameBundle
 
 # Configuration
@@ -20,6 +21,7 @@ HOST = '0.0.0.0'  # Listen on all interfaces
 PORT = 8888
 
 def main():
+    """Start the TCP server and receive ARKit frames from the iPhone."""
     # Create TCP socket
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -31,7 +33,7 @@ def main():
     print("=" * 60)
     print(f"✅ Listening on {HOST}:{PORT}")
     print(f"📱 Configure iPhone to send to: {get_local_ip()}:{PORT}")
-    print(f"⏳ Waiting for connection...\n")
+    print("⏳ Waiting for connection...\n")
 
     rr.init("kiwi_stream", spawn=True)
 
@@ -125,12 +127,12 @@ def main():
 
     except KeyboardInterrupt:
         print(f"\n\n{'=' * 60}")
-        print(f"📊 Session Stats")
+        print("📊 Session Stats")
         print(f"{'=' * 60}")
         print(f"Frames received: {frame_count}")
         print(f"Duration: {elapsed:.1f}s")
         print(f"Average FPS: {fps:.1f}")
-        print(f"\n👋 Receiver stopped")
+        print("\n👋 Receiver stopped")
 
     except Exception as e:
         print(f"\n❌ Error: {e}")
@@ -141,7 +143,7 @@ def main():
 
 
 def recv_exact(sock, num_bytes):
-    """Receive exactly num_bytes from socket (TCP requires this)"""
+    """Receive exactly num_bytes from socket (TCP requires this)."""
     data = b''
     while len(data) < num_bytes:
         chunk = sock.recv(num_bytes - len(data))
@@ -152,7 +154,7 @@ def recv_exact(sock, num_bytes):
 
 
 def get_local_ip():
-    """Get local IP address for display purposes"""
+    """Get local IP address for display purposes."""
     try:
         # Create a socket to find local IP
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -160,7 +162,7 @@ def get_local_ip():
         local_ip = s.getsockname()[0]
         s.close()
         return local_ip
-    except:
+    except Exception:
         return "127.0.0.1"
 
 

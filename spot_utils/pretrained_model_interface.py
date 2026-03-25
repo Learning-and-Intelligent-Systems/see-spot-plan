@@ -47,10 +47,10 @@ class PretrainedLargeModel(abc.ABC):
                             seed: int,
                             stop_token: Optional[str] = None,
                             num_completions: int = 1) -> List[str]:
-        """This is the main method that subclasses must implement.
+        """Return completions from the underlying model.
 
-        This helper method is called by sample_completions(), which
-        caches the prompts and responses to disk.
+        Subclasses must implement this method. It is called by
+        sample_completions(), which caches the prompts and responses to disk.
         """
         raise NotImplementedError("Override me!")
 
@@ -142,6 +142,7 @@ class VisionLanguageModel(PretrainedLargeModel):
             seed: int,
             stop_token: Optional[str] = None,
             num_completions: int = 1) -> List[str]:  # pragma: no cover
+        """Sample completions from the VLM given a prompt and images."""
         assert imgs is not None
         return super().sample_completions(prompt, imgs, temperature, seed,
                                           stop_token, num_completions)
@@ -158,6 +159,7 @@ class LargeLanguageModel(PretrainedLargeModel):
             seed: int,
             stop_token: Optional[str] = None,
             num_completions: int = 1) -> List[str]:  # pragma: no cover
+        """Sample completions from the LLM given a text-only prompt."""
         assert imgs is None
         return super().sample_completions(prompt, imgs, temperature, seed,
                                           stop_token, num_completions)
@@ -255,7 +257,8 @@ class GoogleGeminiModel():
 
     def __init__(self, model_name: str) -> None:
         """See https://ai.google.dev/models/gemini for the list of available
-        model names."""
+        model names.
+        """
         self._model_name = model_name
         assert "GOOGLE_API_KEY" in os.environ
         print(f'Using Gemini API key: {os.getenv("GOOGLE_API_KEY")}')
@@ -272,7 +275,8 @@ class OpenAILLM(LargeLanguageModel, OpenAIModel):
 
     def __init__(self, model_name: str) -> None:
         """See https://platform.openai.com/docs/models for the list of
-        available model names."""
+        available model names.
+        """
         self._model_name = model_name
         # Note that max_tokens is the maximum response length (not prompt).
         # From OpenAI docs: "The token count of your prompt plus max_tokens
@@ -281,6 +285,7 @@ class OpenAILLM(LargeLanguageModel, OpenAIModel):
         self.set_openai_key()
 
     def get_id(self) -> str:
+        """Return a unique identifier for this OpenAI model."""
         return f"openai-{self._model_name}"
 
     def _sample_completions(
@@ -326,11 +331,12 @@ class GoogleGeminiLLM(LargeLanguageModel, GoogleGeminiModel):
             candidate_count=num_completions,
             temperature=temperature)
         response = self._model.generate_content(
-            [prompt], generation_config=generation_config)  # type: ignore
-        response.resolve()  # type: ignore
+            [prompt], generation_config=generation_config)
+        response.resolve()
         return [response.text]
 
     def get_id(self) -> str:
+        """Return a unique identifier for this Google Gemini model."""
         return f"Google-{self._model_name}"
 
 
@@ -360,10 +366,10 @@ class GoogleGeminiVLM(VisionLanguageModel, GoogleGeminiModel):
 
         try:
             response = self._model.generate_content(
-                [prompt] + imgs,  # type: ignore
-                generation_config=generation_config,  # type: ignore
+                [prompt] + imgs,
+                generation_config=generation_config,
             )
-            response.resolve()  # type: ignore
+            response.resolve()
         except Exception as exc:  # pylint:disable=broad-except
             logging.error("Gemini VLM generate_content failed", exc_info=True)
             raise RuntimeError(f"Gemini VLM generate_content failed: {exc}") from exc
@@ -371,12 +377,14 @@ class GoogleGeminiVLM(VisionLanguageModel, GoogleGeminiModel):
         return [response.text]
 
     def get_id(self) -> str:
+        """Return a unique identifier for this Google Gemini VLM."""
         return f"Google-{self._model_name}"
 
 
 class OpenAIVLM(VisionLanguageModel, OpenAIModel):
     """Interface for OpenAI's VLMs, including GPT-4 Turbo (and preview
-    versions)."""
+    versions).
+    """
 
     def __init__(self, model_name: str):
         """Initialize with a specific model name."""

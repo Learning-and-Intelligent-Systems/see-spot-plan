@@ -1,18 +1,14 @@
-"""
-run_plan_example.py
-
-Example script for calling the Spot plan execution FastAPI service.
+"""Example script for calling the Spot plan execution FastAPI service.
 
 It:
 1) Initializes the Spot robot and localizer via POST /init.
 2) Sends a small Python "plan" (list of command strings) via POST /run_plan/string.
 """
 
-from typing import List, Dict, Any
 import os
+from typing import Any, Dict, List
 
 import requests
-
 
 # Base URL for the exec_plan_api FastAPI server
 SPOT_PLAN_API_BASE_URL = os.getenv("SPOT_PLAN_API_BASE_URL", "http://0.0.0.0:8001")
@@ -28,8 +24,7 @@ SPOT_SAM_ENDPOINT = os.getenv("SPOT_SAM_ENDPOINT")  # optional
 
 
 def ensure_spot_api_initialized() -> None:
-    """
-    Ensure the Spot plan execution API has an initialized robot and localizer.
+    """Ensure the Spot plan execution API has an initialized robot and localizer.
 
     It first checks /health; if the robot/localizer are not initialized, it
     issues a POST /init with the configured hostname/map.
@@ -57,8 +52,7 @@ def ensure_spot_api_initialized() -> None:
 
 
 def build_plan_source(plan_lines: List[str]) -> str:
-    """
-    Convert a list of plan command lines into a single Python source string.
+    """Convert a list of plan command lines into a single Python source string.
 
     The FastAPI server expects:
         {"plan_source": "<python commands as a single string>"}
@@ -70,9 +64,7 @@ def build_plan_source(plan_lines: List[str]) -> str:
 
 
 def run_plan_from_lines(plan_lines: List[str]) -> Dict[str, Any]:
-    """
-    Ensure the API is initialized and then execute the given plan lines.
-    """
+    """Ensure the API is initialized and then execute the given plan lines."""
     # 1) Make sure Spot + localizer are initialized
     ensure_spot_api_initialized()
 

@@ -1,50 +1,45 @@
 """Interface for opening a drawer."""
 
 import argparse
-import traceback
-import time
-import numpy as np
-from PIL import Image
 import json
+import traceback
 from typing import Tuple
 
-import open3d as o3d
-from bosdyn.api import (
-    arm_command_pb2,
-    manipulation_api_pb2,
-    robot_command_pb2,
-    synchronized_command_pb2,
-    trajectory_pb2,
-)
-from bosdyn.client.image import ImageClient
 import cv2
-from numpy.typing import NDArray
+import numpy as np
+import rerun as rr
 from bosdyn.client import math_helpers
-from bosdyn.client.frame_helpers import BODY_FRAME_NAME, ODOM_FRAME_NAME, HAND_FRAME_NAME, get_a_tform_b, VISION_FRAME_NAME, get_se2_a_tform_b
-from bosdyn.client.manipulation_api_client import ManipulationApiClient
+from bosdyn.client.frame_helpers import (
+    BODY_FRAME_NAME,
+    HAND_FRAME_NAME,
+    VISION_FRAME_NAME,
+    get_a_tform_b,
+    get_se2_a_tform_b,
+)
 from bosdyn.client.robot_command import (
     RobotCommandBuilder,
     RobotCommandClient,
-    block_until_arm_arrives,
 )
 from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.client.sdk import Robot
-from bosdyn.util import seconds_to_duration
-from google.protobuf.wrappers_pb2 import (
-    DoubleValue,  # pylint: disable=no-name-in-module
-)
+from numpy.typing import NDArray
+from PIL import Image
 
-from spot_utils.utils import verify_estop, get_graph_nav_dir, get_robot_state
+from skills.grasp import grasp_at_pixel
+from skills.spot_hand_move import (
+    move_hand_to_relative_pose,
+    open_gripper,
+    stow_arm,
+)
+from skills.spot_navigation import navigate_to_relative_pose
 from spot_utils.gemini_utils import get_pixel_from_gemini
 from spot_utils.perception.perception_structs import RGBDImageWithContext
-from skills.grasp import grasp_at_pixel
-from skills.spot_navigation import navigate_to_relative_pose
-from skills.spot_hand_move import move_hand_to_relative_pose, open_gripper, close_gripper, stow_arm
+
 # from grasp import grasp_at_pixel
 from spot_utils.perception.spot_cameras import capture_images
-from spot_utils.spot_localization import SpotLocalizer
 from spot_utils.pretrained_model_interface import GoogleGeminiVLM
-import rerun as rr
+from spot_utils.spot_localization import SpotLocalizer
+from spot_utils.utils import get_graph_nav_dir, get_robot_state, verify_estop
 
 DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
     x=0.825, y=0.0, z=-0.1, rot=math_helpers.Quat.from_pitch(np.pi / 24)
@@ -71,6 +66,7 @@ def gaze(robot: Robot, direction: str) -> None:
     open_gripper(robot)
 
 def move_hand_back(robot, dx):
+    """Move the robot hand backward by a given distance along its local x-axis."""
     robot_state_client = robot.ensure_client('robot-state')
     state = robot_state_client.get_robot_state()
 
@@ -88,8 +84,7 @@ def pixels_to_vision_points(
     pixels: list[tuple[int, int]],
     rgbd: RGBDImageWithContext,
 ) -> NDArray[np.float64]:
-    """
-    Convert 2D pixels (u, v) to 3D points (X, Y, Z) in vision frame.
+    """Convert 2D pixels (u, v) to 3D points (X, Y, Z) in vision frame.
 
     Args:
         pixels: list of (u, v) pixel coordinates
@@ -97,8 +92,8 @@ def pixels_to_vision_points(
 
     Returns:
         Nx3 array of 3D points in vision frame (in meters)
-    """
 
+    """
     vision_T_camera = get_a_tform_b(
         rgbd.transforms_snapshot,
         VISION_FRAME_NAME,
@@ -146,8 +141,7 @@ def pixels_to_vision_points(
 
 
 def fit_plane_to_points(points_vision: NDArray[np.float64]):
-    """
-    Fit a plane to 3D points and return its centroid and normal vector.
+    """Fit a plane to 3D points and return its centroid and normal vector.
 
     Args:
         points_vision: Nx3 array of 3D points (in vision frame)
@@ -155,6 +149,7 @@ def fit_plane_to_points(points_vision: NDArray[np.float64]):
     Returns:
         centroid: (3,) array, mean position of points
         normal: (3,) array, unit normal vector of best-fit plane
+
     """
     assert points_vision.shape[1] == 3, "Points must be Nx3"
 
@@ -178,8 +173,7 @@ def fit_plane_to_points(points_vision: NDArray[np.float64]):
 
 
 def grasp_orientation_from_normal(normal_vec: np.ndarray, world_up: np.ndarray = np.array([0, 0, 1])) -> math_helpers.Quat:
-    """
-    Given a normal vector (pointing outward from the drawer), compute a quaternion
+    """Given a normal vector (pointing outward from the drawer), compute a quaternion
     such that the gripper's +X axis points opposite the normal (toward the drawer).
 
     Args:
@@ -188,6 +182,7 @@ def grasp_orientation_from_normal(normal_vec: np.ndarray, world_up: np.ndarray =
 
     Returns:
         math_helpers.Quat representing the grasp orientation.
+
     """
     x_axis = -normal_vec  # gripper faces opposite the drawer normal
 
@@ -211,16 +206,17 @@ def compute_body_pose_in_front_of_drawer(
     current_body_xy: np.ndarray,
     standoff_dist: float = 0.8,
 ) -> math_helpers.SE2Pose:
-    """
-    Compute a 2D pose (x, y, yaw) for Spot's body to face the drawer.
+    """Compute a 2D pose (x, y, yaw) for Spot's body to face the drawer.
 
     Args:
         drawer_point: (3,) coordinates of a point on the drawer surface in vision frame.
         drawer_normal: (3,) unit normal vector pointing out of the drawer in vision frame.
+        current_body_xy: (2,) current body position in the vision frame XY plane.
         standoff_dist: distance to stand off from the drawer surface (m).
 
     Returns:
         math_helpers.SE2Pose representing where the body should move.
+
     """
     # Use only the horizontal component of the normal to avoid tilting effects.
     horizontal_normal = np.array([drawer_normal[0], drawer_normal[1], 0.0])
@@ -254,9 +250,7 @@ def compute_body_pose_in_front_of_drawer(
 
 
 def compute_rotated_body_pose(robot: Robot, normal_vector: Tuple[float, float]) -> math_helpers.SE2Pose:
-    """
-    Rotate Spot's body to align with opposite of normal vector.
-    """
+    """Rotate Spot's body to align with opposite of normal vector."""
     robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
     state = robot_state_client.get_robot_state()
     vision_T_body = get_a_tform_b(state.kinematic_state.transforms_snapshot,
@@ -265,18 +259,16 @@ def compute_rotated_body_pose(robot: Robot, normal_vector: Tuple[float, float]) 
     x = vision_T_body.x
     y = vision_T_body.y
     yaw = np.arctan2(-normal_vector[1], -normal_vector[0])
-    se2 = vision_T_body.get_closest_se2_transform()
-    # print("CURRENT POSE: ", math_helpers.SE2Pose(x, y, se2.angle))
     return math_helpers.SE2Pose(x, y, yaw)
 
 
 def set_body_height(robot, height_offset_m: float):
-    """
-    Adjust Spot's body height up or down.
+    """Adjust Spot's body height up or down.
     
     Args:
         robot: an instance of bosdyn.client.sdk.Robot
         height_offset_m: positive to raise, negative to lower (in meters)
+
     """
     command_client = robot.ensure_client(RobotCommandClient.default_service_name)
 
@@ -291,6 +283,7 @@ def set_body_height(robot, height_offset_m: float):
 
 
 def navigate_to_vision_goal(robot, vision_tform_goal: math_helpers.SE2Pose):
+    """Navigate the robot to a goal pose specified in the vision frame."""
     # 1. Get the current robot transforms
     robot_state = get_robot_state(robot)
     transforms = robot_state.kinematic_state.transforms_snapshot
@@ -306,8 +299,9 @@ def navigate_to_vision_goal(robot, vision_tform_goal: math_helpers.SE2Pose):
 
 
 def get_multiple_pixels_from_gemini(
-    vlm_query_str: str, pil_image: Image, num_pixels: int = 15
+    vlm_query_str: str, pil_image: Image.Image, num_pixels: int = 15
 ) -> list[Tuple[int, int]]:
+    """Query Gemini VLM to select pixel coordinates on an image."""
     # Assuming create_vlm_by_name exists and works like create_llm_by_name
     # Use the specific model name from CFG or hardcode if necessary
     vlm = GoogleGeminiVLM("gemini-2.0-flash")
@@ -370,7 +364,8 @@ def get_multiple_pixels_from_gemini(
     return pixels
 
 
-def draw_colored_pixels(image_pil: Image, pixels: list[Tuple[int, int]], path: str, color: str):
+def draw_colored_pixels(image_pil: Image.Image, pixels: list[Tuple[int, int]], path: str, color: str):
+    """Draw colored markers at the given pixel locations and save the image."""
     pixels_obj = image_pil.load()
     for pixel in pixels:
         for dx in range(-2, 3):
@@ -382,6 +377,7 @@ def draw_colored_pixels(image_pil: Image, pixels: list[Tuple[int, int]], path: s
 
 
 def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
+    """Convert pixel coordinates to 3D points using RGB and depth images."""
     rgb = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
     depth = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
 
@@ -443,14 +439,15 @@ def open_drawer(
     body_height_offset: float = 0.0,
     retreat_offset: float = 0.4,
 ) -> None:
-    """
-    Reach toward a drawer handle, close the gripper to grasp it, 
-    then return to a resting pose and open the gripper.
-    
+    """Reach toward a drawer handle, close the gripper to grasp it, then retreat.
+
     Args:
         robot: Spot robot instance.
-        approach_offset: Distance (m) to stop before touching the handle.
-        timeout: Seconds to allow for each arm motion.
+        localizer: SpotLocalizer for obtaining robot pose.
+        standoff_dist: Distance (m) to stand off from the drawer surface.
+        body_height_offset: Height offset (m) for Spot's body stance.
+        retreat_offset: Distance (m) to retreat after grasping.
+
     """
     # Gaze at drawer ahead
     gaze(robot, "AHEAD")
@@ -529,9 +526,8 @@ def open_drawer(
     # grasp_rot = grasp_orientation_from_normal(normal_vector)
 
     # ACTION: Move Spot's body to be aligned to the front of the drawer normal FIRST
-    rotated_body_pose = compute_rotated_body_pose(robot, normal_vector)
-    # print("ROTATED POSE IS: ", rotated_body_pose)
-    # navigate_to_vision_goal(robot, rotated_body_pose)
+    rotated_body_pose = compute_rotated_body_pose(robot, normal_vector)  # noqa: F841
+    # TODO: navigate_to_vision_goal(robot, rotated_body_pose)
     robot_state = get_robot_state(robot)
     transforms = robot_state.kinematic_state.transforms_snapshot
     vision_tform_body = get_se2_a_tform_b(transforms, VISION_FRAME_NAME, BODY_FRAME_NAME)
@@ -575,6 +571,7 @@ def look_into_drawer(robot: Robot, localizer: SpotLocalizer):
     Args:
         robot: Spot robot instance.
         localizer: SpotLocalizer instance.
+
     """
     # Move arm to look into drawer.
     gaze(robot, "INTO")

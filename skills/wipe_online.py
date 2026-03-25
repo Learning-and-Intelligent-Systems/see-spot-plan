@@ -1,8 +1,15 @@
-import argparse
-from typing import Optional
-import json
+"""Skill to detect and wipe spills on surfaces using Spot's arm."""
 
+import argparse
+import json
+import os
+from datetime import datetime
+from typing import Optional
+
+import cv2
 import numpy as np
+import open3d as o3d
+import rerun as rr
 from bosdyn.client import create_standard_sdk, math_helpers
 from bosdyn.client.frame_helpers import (
     BODY_FRAME_NAME,
@@ -12,27 +19,22 @@ from bosdyn.client.frame_helpers import (
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.sdk import Robot
 from bosdyn.client.util import authenticate
+from PIL import Image
 
-from spot_utils.perception.spot_cameras import capture_images
-from spot_utils.spot_localization import SpotLocalizer
-from spot_utils.utils import verify_estop, get_graph_nav_dir
-from spot_utils.pretrained_model_interface import GoogleGeminiVLM
 from skills.spot_hand_move import (
     move_hand_to_relative_pose,
     move_hand_to_relative_pose_with_velocity,
     open_gripper,
-    close_gripper,
     stow_arm,
 )
-import rerun as rr
-import cv2
-import os
-from datetime import datetime
-from PIL import Image
-import open3d as o3d
+from spot_utils.perception.spot_cameras import capture_images
+from spot_utils.pretrained_model_interface import GoogleGeminiVLM
+from spot_utils.spot_localization import SpotLocalizer
+from spot_utils.utils import get_graph_nav_dir, verify_estop
 
 
 def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseKeepAlive, SpotLocalizer]:
+    """Initialize the robot connection, authenticate, sync time, and localize."""
     sdk = create_standard_sdk("WipeOnlineClient")
     robot = sdk.create_robot(hostname)
     authenticate(robot)
@@ -43,7 +45,7 @@ def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseK
         lease_client, must_acquire=True, return_at_exit=True
     )
     robot.time_sync.wait_for_sync()
-    
+
     # Initialize localizer
     path = get_graph_nav_dir(map_name)
     localizer = SpotLocalizer(robot, path, lease_client, lease_keepalive)
@@ -76,11 +78,13 @@ DEFAULT_WIPE_VLM_QUERY_TEMPLATE = (
 
 
 def visualize_bbox_normalized(image_path, bbox_norm, color=(0, 255, 0), thickness=2):
-    """
-    img: HxWx3 uint8 (BGR)
-    bbox_norm: [ymin, xmin, ymax, xmax] with each in [0, 1000]
+    """Visualize a normalized bounding box on an image.
+
+    img: HxWx3 uint8 (BGR).
+    bbox_norm: [ymin, xmin, ymax, xmax] with each in [0, 1000].
     """
     img = cv2.imread(image_path)
+    assert img is not None, f"Failed to read image: {image_path}"
     H, W = img.shape[:2]
     ymin, xmin, ymax, xmax = map(float, bbox_norm)
 
@@ -91,8 +95,10 @@ def visualize_bbox_normalized(image_path, bbox_norm, color=(0, 255, 0), thicknes
     y2 = int(np.clip(ymax * H / 1000.0, 0, H - 1))
 
     # Ensure non-degenerate box
-    if x2 <= x1: x2 = min(x1 + 1, W - 1)
-    if y2 <= y1: y2 = min(y1 + 1, H - 1)
+    if x2 <= x1:
+        x2 = min(x1 + 1, W - 1)
+    if y2 <= y1:
+        y2 = min(y1 + 1, H - 1)
 
     # Rectangle
     img_out = img.copy()
@@ -104,8 +110,7 @@ def visualize_bbox_normalized(image_path, bbox_norm, color=(0, 255, 0), thicknes
     return img_out
 
 def draw_bounding_box(image_path, bbox_pixels, color=(0, 255, 0), thickness=2):
-    """
-    Draw a bounding box using pixel coordinates directly (no normalization).
+    """Draw a bounding box using pixel coordinates directly (no normalization).
 
     Args:
         image_path (str): Path to the image file.
@@ -115,6 +120,7 @@ def draw_bounding_box(image_path, bbox_pixels, color=(0, 255, 0), thickness=2):
 
     Returns:
         The annotated image (numpy array, BGR).
+
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -149,8 +155,7 @@ def compute_target_pose_from_bbox(
     bbox_pixels: list[int],
     z_clearance_m: float = 0.02,
 ) -> math_helpers.SE3Pose:
-    """
-    Compute the target pose from the bbox pixels.
+    """Compute the target pose from the bbox pixels.
     bbox_pixels: [ymin, xmin, ymax, xmax] in pixel units.
     """
     ymin, xmin, ymax, xmax = bbox_pixels
@@ -205,8 +210,7 @@ def wipe_one_stroke(
     move_dy: float,
     duration: float,
 ):
-    """
-    Execute a single wipe stroke starting at wipe_start_pose and moving by
+    """Execute a single wipe stroke starting at wipe_start_pose and moving by
     (move_dx, move_dy) in the BODY frame, then returning to the start.
     """
     move_hand_to_relative_pose(robot, wipe_start_pose)
@@ -235,8 +239,7 @@ def wipe_multiple_strokes(
     duration_per_stroke: float,
     num_attempts_per_stroke: int,
 ):
-    """
-    Execute multiple wipe strokes. After each stroke (and attempts) the start pose
+    """Execute multiple wipe strokes. After each stroke (and attempts) the start pose
     is shifted by delta_x_y_between_strokes in BODY frame.
     """
     curr = wipe_start_pose
@@ -304,13 +307,10 @@ def _compute_wipe_params_from_bbox(
     spacing_m: float = 0.05,
     max_stroke_len: float = 0.35,
 ):
-    """
-    From bbox [ymin,xmin,ymax,xmax] in pixels, compute:
-      - wipe_start_pose (at bottom-right corner + clearance)
-      - stroke_dx, stroke_dy (upwards along bbox height)
-      - delta_x_y_between_strokes (across bbox width)
-      - num_strokes (coverage based on spacing)
-      - end_look_pose (generic)
+    """Compute wipe parameters from a bounding box in pixels.
+
+    Returns wipe_start_pose, stroke deltas, inter-stroke spacing,
+    num_strokes, and end_look_pose.
     """
     ymin, xmin, ymax, xmax = bbox
     p_br = (int(xmax), int(ymax))
@@ -368,13 +368,13 @@ def _compute_wipe_params_from_bbox(
     )
 
 def visualize_bbox_prediction(image_path, bbox):
-    """
-    Draws a SCALED bounding box on an image using OpenCV and displays it.
+    """Draws a SCALED bounding box on an image using OpenCV and displays it.
 
     Args:
         image_path (str): Path to the ORIGINAL image file.
         bbox (list): Bounding box [ymin, xmin, ymax, xmax] from the model,
                      relative to the model's input size.
+
     """
     try:
         # --- Dimensions of the image the model processed ---
@@ -427,8 +427,7 @@ def visualize_bbox_prediction(image_path, bbox):
 def get_bbox_from_gemini(
     vlm_query_str: str, pil_image: Image.Image
 ) -> list[int]:
-    """
-    Query Gemini VLM to get the bbox coordinates corresponding to the query.
+    """Query Gemini VLM to get the bbox coordinates corresponding to the query.
     
     Args:
         vlm_query_str: Prompt asking Gemini to identify the spill
@@ -436,10 +435,11 @@ def get_bbox_from_gemini(
     
     Returns:
         List of [ymin, xmin, ymax, xmax] in pixel coordinates
+
     """
     # Ensure API key is set for Gemini
     # vlm = GoogleGeminiVLM("gemini-2.5-flash-preview-05-20")
-    print(f'inside the function to get the bbox from gemini')
+    print('inside the function to get the bbox from gemini')
     # vlm = GoogleGeminiVLM("gemini-2.5-flash")
     # vlm = GoogleGeminiVLM("gemini-2.0-flash")
     vlm = GoogleGeminiVLM("gemini-2.5-pro")
@@ -460,10 +460,10 @@ def get_bbox_from_gemini(
         try:
             obj = json.loads(s)
         except Exception:
-            l, r = s.find("{"), s.rfind("}")
-            if l == -1 or r == -1 or r <= l:
+            left, right = s.find("{"), s.rfind("}")
+            if left == -1 or right == -1 or right <= left:
                 raise ValueError("Could not find JSON object in model response.")
-            obj = json.loads(s[l:r + 1])
+            obj = json.loads(s[left:right + 1])
 
         if not isinstance(obj, dict) or "bbox" not in obj:
             raise ValueError("Expected a JSON object with key 'bbox'.")
@@ -504,6 +504,7 @@ def get_bbox_from_gemini(
 
 
 def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
+    """Back-project RGB and depth images into a 3D point cloud with colors."""
     rgb = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
     depth = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
 
@@ -565,6 +566,7 @@ def wipe_online(
     z_offset: float = DEFAULT_WIPE_ONLINE_Z_OFFSET,
     expand_percentage: float = 0.0,
 ) -> None:
+    """Detect a spill using vision and execute wiping motions to clean it."""
     # stow the arm
     stow_arm(robot)
     # have the robot look ahead to look at the spill 
@@ -609,10 +611,14 @@ def wipe_online(
     # o3d.visualization.draw_geometries([pcd])
 
     voxel_size = 0.005
-    rgb = cv2.cvtColor(cv2.imread(rgb_image_path), cv2.COLOR_BGR2RGB)
+    rgb_raw = cv2.imread(rgb_image_path)
+    assert rgb_raw is not None, f"Failed to read image: {rgb_image_path}"
+    rgb = cv2.cvtColor(rgb_raw, cv2.COLOR_BGR2RGB)
     rr.log('camera/rgb', rr.Image(rgb))
 
-    depth = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / 1000.0
+    depth_raw = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
+    assert depth_raw is not None, f"Failed to read image: {depth_image_path}"
+    depth = depth_raw.astype(np.float32) / 1000.0
     print(f'printing the max and min values of the depth image : {depth.max()} and {depth.min()}')
     rr.log('camera/depth', rr.Image(depth))
 
@@ -660,7 +666,9 @@ def wipe_online(
 
     ## log the annotated image with the bounding box 
     annotated_image_path = draw_bounding_box(os.path.join(save_folderpath, f"rgb_{timestamp}.png"), bbox)
-    annotated_img = cv2.cvtColor(cv2.imread(annotated_image_path), cv2.COLOR_BGR2RGB)
+    annotated_raw = cv2.imread(annotated_image_path)
+    assert annotated_raw is not None, f"Failed to read image: {annotated_image_path}"
+    annotated_img = cv2.cvtColor(annotated_raw, cv2.COLOR_BGR2RGB)
     rr.log('results/annotated', rr.Image(annotated_img))
 
     ## move the hand to the bottom-right position of the bounding box 
@@ -755,6 +763,7 @@ def wipe_online(
     )
 
 def main() -> None:
+    """Parse arguments and run the wipe-online skill."""
     parser = argparse.ArgumentParser(description="Online wiping controller.")
     parser.add_argument(
         "--hostname",

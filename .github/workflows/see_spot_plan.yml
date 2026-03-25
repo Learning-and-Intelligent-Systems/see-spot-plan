@@ -21,12 +21,12 @@ jobs:
     - name: Install dependencies
       run: |
         pip install -e .
-        pip install mypy==1.8.0 ruff  # Install Ruff
+        pip install ty ruff
 
     - name: Run Ruff (Linting)
       run: |
         ruff check  # Run Ruff with the config in ruff.toml
 
-    - name: Mypy
+    - name: Type check (ty)
       run: |
-        mypy . --config-file mypy.ini
+        ty check .

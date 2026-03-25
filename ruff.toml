@@ -40,7 +40,7 @@ target-version = "py39"
 # Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
 # McCabe complexity (`C901`) by default.
 select = ["E4", "E7", "E9", "F", "D", "I"]
-ignore = ["D205", "D401"]
+ignore = ["D205", "D401", "D203", "D213"]
 
 # Ensure that all missing docstring errors (`D1`) are enforced.
 extend-select = ["D1"]

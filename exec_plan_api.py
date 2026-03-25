@@ -21,7 +21,6 @@ from pydantic import BaseModel
 import exec_plan
 from spot_utils.utils import get_graph_nav_dir
 
-
 app = FastAPI(title="Spot Plan Execution API")
 
 
@@ -124,6 +123,7 @@ if __name__ == "__main__":
     # Convenience entrypoint for local development:
     #   python exec_plan_api.py --host 0.0.0.0 --port 8000
     import argparse
+
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Run the Spot Plan Execution API server.")

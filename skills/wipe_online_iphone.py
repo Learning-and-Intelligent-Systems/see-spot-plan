@@ -1,38 +1,43 @@
+"""Online wiping controller using Spot and an iPhone depth sensor."""
+
 import argparse
-from typing import Optional
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
-import time
+from typing import Optional
 
 import cv2
 import numpy as np
 import open3d as o3d
 import rerun as rr
-from PIL import Image
 from bosdyn.client import create_standard_sdk, math_helpers
-from bosdyn.client.frame_helpers import BODY_FRAME_NAME, VISION_FRAME_NAME, get_a_tform_b
+from bosdyn.client.frame_helpers import (
+    BODY_FRAME_NAME,
+    get_a_tform_b,
+)
 from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.sdk import Robot
 from bosdyn.client.util import authenticate
+from PIL import Image
 
-from spot_utils.utils import verify_estop, get_graph_nav_dir
-from spot_utils.pretrained_model_interface import GoogleGeminiVLM
-from spot_utils.perception.spot_cameras import _image_response_to_image
+from calibrate_iphone import rgbd_to_point_cloud
+from iphone_streaming import get_latest_frame
 from skills.spot_hand_move import (
     move_hand_to_relative_pose,
     move_hand_to_relative_pose_with_velocity,
     open_gripper,
-    close_gripper,
     stow_arm,
 )
-from calibrate_iphone import rgbd_to_point_cloud
-from iphone_streaming import get_latest_frame
+from spot_utils.perception.spot_cameras import _image_response_to_image
+from spot_utils.pretrained_model_interface import GoogleGeminiVLM
+from spot_utils.utils import verify_estop
 
 
 def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseKeepAlive]:
+    """Initialize and authenticate the robot, returning the robot, lease client, and keepalive."""
     sdk = create_standard_sdk("WipeOnlineClient")
     robot = sdk.create_robot(hostname)
     authenticate(robot)
@@ -304,8 +309,7 @@ def _compute_wipe_params_from_bbox_iphone(
 #     return img_out
 
 def draw_bounding_box(image_path, bbox_pixels, color=(0, 255, 0), thickness=2):
-    """
-    Draw a bounding box using pixel coordinates directly (no normalization).
+    """Draw a bounding box using pixel coordinates directly (no normalization).
 
     Args:
         image_path (str): Path to the image file.
@@ -315,6 +319,7 @@ def draw_bounding_box(image_path, bbox_pixels, color=(0, 255, 0), thickness=2):
 
     Returns:
         The annotated image (numpy array, BGR).
+
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -435,8 +440,7 @@ def wipe_multiple_strokes(
     duration_per_stroke: float,
     num_attempts_per_stroke: int,
 ):
-    """
-    Execute multiple wipe strokes. After each stroke (and attempts) the start pose
+    """Execute multiple wipe strokes. After each stroke (and attempts) the start pose
     is shifted by delta_x_y_between_strokes in BODY frame.
     """
     curr = wipe_start_pose
@@ -627,8 +631,7 @@ def wipe_multiple_strokes(
 def get_bbox_from_gemini(
     vlm_query_str: str, pil_image: Image.Image
 ) -> list[int]:
-    """
-    Query Gemini VLM to get the bbox coordinates corresponding to the query.
+    """Query Gemini VLM to get the bbox coordinates corresponding to the query.
     
     Args:
         vlm_query_str: Prompt asking Gemini to identify the spill
@@ -636,10 +639,11 @@ def get_bbox_from_gemini(
     
     Returns:
         List of [ymin, xmin, ymax, xmax] in pixel coordinates
+
     """
     # Ensure API key is set for Gemini
     # vlm = GoogleGeminiVLM("gemini-2.5-flash-preview-05-20")
-    print(f'inside the function to get the bbox from gemini')
+    print('inside the function to get the bbox from gemini')
     # vlm = GoogleGeminiVLM("gemini-2.5-flash")
     # vlm = GoogleGeminiVLM("gemini-2.0-flash")
     vlm = GoogleGeminiVLM("gemini-2.5-pro")
@@ -660,10 +664,10 @@ def get_bbox_from_gemini(
         try:
             obj = json.loads(s)
         except Exception:
-            l, r = s.find("{"), s.rfind("}")
-            if l == -1 or r == -1 or r <= l:
+            left, right = s.find("{"), s.rfind("}")
+            if left == -1 or right == -1 or right <= left:
                 raise ValueError("Could not find JSON object in model response.")
-            obj = json.loads(s[l:r + 1])
+            obj = json.loads(s[left:right + 1])
 
         if not isinstance(obj, dict) or "bbox" not in obj:
             raise ValueError("Expected a JSON object with key 'bbox'.")
@@ -757,21 +761,21 @@ def gaze(robot, direction: str) -> None:
     open_gripper(robot)
 
 def gaze_without_open(robot, direction: str) -> None:
-    """ Move the hand to look in a certain direction without opening the gripper."""
+    """Move the hand to look in a certain direction without opening the gripper."""
     look_pose = direction_to_pose[direction]
     move_hand_to_relative_pose(robot, look_pose)
 
 def wipe_online(
     robot: Robot,
-    lease_client: LeaseClient,
-    lease_keepalive: LeaseKeepAlive,
+    lease_client: Optional[LeaseClient] = None,
+    lease_keepalive: Optional[LeaseKeepAlive] = None,
     localizer=None,
     vlm_query_template: str = DEFAULT_WIPE_VLM_QUERY_TEMPLATE,
     z_offset: float = DEFAULT_WIPE_ONLINE_Z_OFFSET,
     expand_percentage: float = 0.0,
     iphone_extrinsics_path: str = DEFAULT_IPHONE_EXTRINSICS_PATH,
 ) -> None:
-
+    """Run the online wiping loop using VLM-guided spill detection and iPhone depth sensing."""
     # stow the arm
     stow_arm(robot)
     # have the robot look ahead to look at the spill
@@ -838,7 +842,9 @@ def wipe_online(
     # o3d.visualization.draw_geometries([pcd])
 
     voxel_size = 0.005
-    rgb = cv2.cvtColor(cv2.imread(rgb_image_path), cv2.COLOR_BGR2RGB)
+    rgb_raw = cv2.imread(rgb_image_path)
+    assert rgb_raw is not None, f"Failed to read image: {rgb_image_path}"
+    rgb = cv2.cvtColor(rgb_raw, cv2.COLOR_BGR2RGB)
     rr.log("camera/rgb", rr.Image(rgb))
 
     depth_m = depth_img.astype(np.float32)
@@ -903,7 +909,9 @@ def wipe_online(
 
     ## log the annotated image with the bounding box 
     annotated_image_path = draw_bounding_box(os.path.join(save_folderpath, f"rgb_{timestamp}.png"), bbox_rgb)
-    annotated_img = cv2.cvtColor(cv2.imread(annotated_image_path), cv2.COLOR_BGR2RGB)
+    annotated_raw = cv2.imread(annotated_image_path)
+    assert annotated_raw is not None, f"Failed to read image: {annotated_image_path}"
+    annotated_img = cv2.cvtColor(annotated_raw, cv2.COLOR_BGR2RGB)
     rr.log('results/annotated', rr.Image(annotated_img))
 
     ## move the hand to the bottom-right position of the bounding box 
@@ -1029,6 +1037,7 @@ def wipe_online(
     )
 
 def main() -> None:
+    """Parse arguments and run the online wiping controller."""
     parser = argparse.ArgumentParser(description="Online wiping controller.")
     parser.add_argument(
         "--hostname",

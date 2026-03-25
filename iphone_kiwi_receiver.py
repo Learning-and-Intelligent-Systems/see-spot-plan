@@ -1,5 +1,4 @@
-"""
-Kiwi iPhone RGBD receiver usable as a library.
+"""Kiwi iPhone RGBD receiver usable as a library.
 
 This module implements a small TCP server that receives ARKit frame bundles
 from the Kiwi iOS app via Protocol Buffers (FrameBundle proto), and exposes
@@ -52,6 +51,7 @@ class KiwiReceiver:
     """
 
     def __init__(self, host: str = "0.0.0.0", port: int = 8888) -> None:
+        """Initialize the TCP server and accept a connection from the iPhone."""
         self._host = host
         self._port = port
         self._server_sock: Optional[socket.socket] = None
