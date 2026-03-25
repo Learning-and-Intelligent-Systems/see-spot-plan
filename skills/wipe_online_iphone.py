@@ -72,7 +72,7 @@ DEFAULT_WIPE_ONLINE_Z_OFFSET = 0.08
 # )
 
 DEFAULT_WIPE_VLM_QUERY_TEMPLATE = (
-    "You are given an image. Identify the spill region (liquid/food spill/stain) if present.\n"
+    "You are given an image. Identify the spill region (liquid/food spill/stain/writing) if present.\n"
     "Return a bounding box that tightly encloses the spill region.\n"
     "If there is no spill visible or it is ambiguous, return a bbox of null.\n\n"
     'Output format (return EXACTLY one JSON object and nothing else):\n'
