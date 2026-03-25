@@ -1,0 +1,297 @@
+"""Skill for closing an open cabinet drawer using Spot's arm."""
+
+import argparse
+from typing import Optional
+
+import numpy as np
+import rerun as rr
+from bosdyn.client import create_standard_sdk, math_helpers
+from bosdyn.client.frame_helpers import (
+    BODY_FRAME_NAME,
+    VISION_FRAME_NAME,
+    get_a_tform_b,
+    get_se2_a_tform_b,
+)
+from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
+from bosdyn.client.util import authenticate
+from PIL import Image
+
+from skills.grasp import grasp_at_pixel
+from skills.spot_hand_move import open_gripper, stow_arm
+from skills.spot_navigation import navigate_to_relative_pose
+from spot_utils.gemini_utils import get_pixel_from_gemini
+from spot_utils.perception.spot_cameras import capture_images
+from spot_utils.spot_localization import SpotLocalizer
+from spot_utils.utils import get_graph_nav_dir, get_robot_state, verify_estop
+
+from .open_cabinet import (
+    compute_body_pose_in_front_of_drawer,
+    draw_colored_pixels,
+    fit_plane_to_points,
+    gaze,
+    get_multiple_pixels_from_gemini,
+    get_points_from_pixels,
+    move_hand_back,
+    navigate_to_vision_goal,
+    pixels_to_vision_points,
+    prompt_get_handle_pixel,
+)
+
+# prompt_get_drawer_surface_pixel = """
+# You are looking at a cabinet with several drawers, but only one drawer is open and it has a green handle wrapped in tape.
+# Select exactly 15 points on the flat front face of that open drawer only.
+# Rules:
+# - Ignore all closed drawers, cabinet edges, and background objects.
+# - Do not place points on the green handle, tape, hardware, or any side/top/bottom faces.
+# - The points must lie entirely on the visible rectangular face that moves when the drawer is opened.
+# - Do not mess up. IF you pick wrong points not on the face of the open drawer, the robot will slam into the cabinet and the lab will be down $20,000.
+# Return JSON of the form [{"point": [y, x], "label": "open_drawer_face"}] with coordinates normalized to 0-1000.
+# """
+
+# prompt_get_drawer_surface_pixel = """
+# You are looking at a cabinet with several drawers, and one of the drawers is open. 
+# Select exactly 5 points on the front face of the open drawer only, and avoid the green handle and the edges of the open drawer. 
+# You are looking at a cabinet with several drawers, but only one drawer is open and it has a dark green handle wrapped in tape.
+# Select exactly 5 points on the white front face of that one open drawer only, avoiding the dark green handle and the edges of the open drawer.
+# Return JSON of the form [{"point": [y, x], "label": "open_drawer_face"}] with coordinates normalized to 0-1000.
+# """
+
+prompt_get_drawer_surface_pixel = """
+You are looking at a cabinet with several drawers, and one of the drawers is open. 
+Select exactly 15 points on the front face of the open drawer only, and avoid the green handle and the edges of the open drawer. 
+Return JSON of the form [{"point": [y, x], "label": "open_drawer_face"}] with coordinates normalized to 0-1000.
+"""
+
+
+def close_drawer(
+    robot,
+    localizer,
+    standoff_dist: float = 0.8,
+    body_height_offset: float = 0.0,
+    advance_offset: float = 0.4,
+    checkpoint: int = 7,
+) -> Optional[Image.Image]:
+    """Close an open cabinet drawer by pushing it shut with the robot arm."""
+    # Retreat slightly to mirror the opening routine.
+    retreat_pose = math_helpers.SE2Pose(-0.3, 0.0, 0.0)
+    navigate_to_relative_pose(robot, retreat_pose)
+
+    # Point the hand camera towards the drawer.
+    gaze(robot, "AHEAD")
+
+
+    # Capture RGBD image from Spot hand camera
+    rgbds = capture_images(robot, localizer, camera_names=["hand_color_image"])
+    rgbd = rgbds["hand_color_image"]
+    # rgbd=None
+
+    # Extract RGB image and depth image
+    rgb = rgbd.rgb
+    depth = rgbd.depth
+    depth_pil = Image.fromarray(depth)
+    depth_pil.save("close_raw_hand_camera_depth.png")
+    rr.log("drawer_rgb", rr.Image(rgb))
+    image_pil = Image.fromarray(rgb)
+    image_pil.save("close_raw_hand_camera_output.jpg")
+
+    # Get a 2D pixel on the handle, and convert to 3D point
+    handle_pixel = get_pixel_from_gemini(prompt_get_handle_pixel, image_pil)
+    draw_colored_pixels(image_pil, [handle_pixel], "close_annotated_hand_camera_output.jpg", "red")
+    
+    cam_model = rgbd.camera_model  
+
+    fx = cam_model.intrinsics.focal_length.x
+    fy = cam_model.intrinsics.focal_length.y
+    cx = cam_model.intrinsics.principal_point.x
+    cy = cam_model.intrinsics.principal_point.y
+
+    intrinsics = [fx, fy, cx, cy]
+
+    rgb_image_path = "close_raw_hand_camera_output.jpg"
+    depth_image_path = "close_raw_hand_camera_depth.png"
+    points, colors = get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics)
+
+    # Convert entire point cloud from camera → vision frame
+    vision_T_camera = get_a_tform_b(
+        rgbd.transforms_snapshot,
+        VISION_FRAME_NAME,
+        rgbd.frame_name_image_sensor
+    )
+    points_hom = np.hstack([points, np.ones((points.shape[0], 1), dtype=np.float32)])
+    vision_T_camera_mat = vision_T_camera.to_matrix()
+    points_vision = (vision_T_camera_mat @ points_hom.T).T[:, :3].astype(np.float32)
+
+    handle_3d_point = pixels_to_vision_points([handle_pixel], rgbd)[0]
+    voxel_size = 0.005
+    rr.log("3D_points", rr.Points3D(positions=points_vision, colors=colors, radii=voxel_size / 2))
+    
+    # Get pixels on surface of drawer via SAM (try just Gemini first, get 15 pixels on front of drawer)
+    front_surface_pixels = get_multiple_pixels_from_gemini(prompt_get_drawer_surface_pixel, image_pil, 15)
+    draw_colored_pixels(image_pil, front_surface_pixels, "close_annotated_hand_camera_output.jpg", "blue")
+    rr.log("drawer_pixels", rr.Image(np.array(image_pil)))
+
+    # Convert to 3D points on surface of drawer
+    front_surface_3d_points = pixels_to_vision_points(front_surface_pixels, rgbd)
+    rr.log("surface_points", rr.Points3D(positions=front_surface_3d_points, colors=[255, 0, 0], radii=voxel_size * 1.5))
+
+    # Fit a plane to those points via SVD and get normal vector
+    surface_centroid, normal_vector = fit_plane_to_points(front_surface_3d_points)
+    print("NORMAL VECTOR IS: ", normal_vector)
+    print("SURFACE CENTROID IS: ", surface_centroid)
+
+    # Log the normal vector as a 3D arrow from the centroid of surface points
+    rr.log("drawer_normal", rr.Arrows3D(origins=surface_centroid, vectors=normal_vector * 0.3, colors=[0, 255, 0]))
+
+    # Visualize the fitted plane as a mesh
+    # Compute two orthogonal vectors in the plane
+    world_up = np.array([0, 0, 1])
+    if abs(np.dot(normal_vector, world_up)) > 0.9:
+        # Normal is too close to vertical, use a different reference
+        world_up = np.array([1, 0, 0])
+
+    # First tangent vector in the plane
+    tangent1 = np.cross(normal_vector, world_up)
+    tangent1 = tangent1 / np.linalg.norm(tangent1)
+
+    # Second tangent vector in the plane (orthogonal to both normal and tangent1)
+    tangent2 = np.cross(normal_vector, tangent1)
+    tangent2 = tangent2 / np.linalg.norm(tangent2)
+
+    # Create corners of the plane visualization around the centroid
+    # Make the plane 0.3m x 0.3m for visibility
+    plane_size = 0.3
+    corner_offsets = [
+        -tangent1 * plane_size/2 - tangent2 * plane_size/2,  # A: bottom-left
+        tangent1 * plane_size/2 - tangent2 * plane_size/2,   # B: bottom-right
+        tangent1 * plane_size/2 + tangent2 * plane_size/2,   # C: top-right
+        -tangent1 * plane_size/2 + tangent2 * plane_size/2,  # D: top-left
+    ]
+
+    plane_corners = np.array([surface_centroid + offset for offset in corner_offsets], dtype=np.float32)
+
+    # Log the plane corners as points
+    rr.log(
+        "fitted_plane/corners",
+        rr.Points3D(
+            positions=plane_corners,
+            colors=np.array([[255, 255, 0]] * 4, dtype=np.uint8),
+            radii=0.01,
+        ),
+    )
+
+    # Log the fitted plane as a mesh (two triangles forming a square)
+    rr.log(
+        "fitted_plane/mesh",
+        rr.Mesh3D(
+            vertex_positions=plane_corners,
+            triangle_indices=np.array([[0, 1, 2], [0, 2, 3]], dtype=np.uint32),
+            vertex_colors=np.array([[0, 255, 255, 100]] * 4, dtype=np.uint8),  # Semi-transparent cyan
+        ),
+    )
+
+    # Log the two tangent vectors as arrows from the centroid
+    rr.log("fitted_plane/tangent1", rr.Arrows3D(origins=surface_centroid, vectors=tangent1 * 0.15, colors=[255, 0, 255]))
+    rr.log("fitted_plane/tangent2", rr.Arrows3D(origins=surface_centroid, vectors=tangent2 * 0.15, colors=[255, 255, 0]))
+
+    if checkpoint == 0:
+        return None
+
+    # Compute approach grasp pose, aligned to normal
+    # grasp_rot = grasp_orientation_from_normal(normal_vector)
+
+    # ACTION: Move Spot's body to be aligned to the front of the drawer normal FIRST
+    # rotated_body_pose = compute_rotated_body_pose(robot, normal_vector)
+    # print("ROTATED POSE IS: ", rotated_body_pose)
+    # navigate_to_vision_goal(robot, rotated_body_pose)
+    robot_state = get_robot_state(robot)
+    transforms = robot_state.kinematic_state.transforms_snapshot
+    vision_tform_body = get_se2_a_tform_b(transforms, VISION_FRAME_NAME, BODY_FRAME_NAME)
+    current_body_xy = np.array([vision_tform_body.x, vision_tform_body.y])
+
+    body_target_pose = compute_body_pose_in_front_of_drawer(
+        handle_3d_point, normal_vector, current_body_xy, standoff_dist
+    )
+    # print("BODY POSE IS: ", body_target_pose)
+    navigate_to_vision_goal(robot, body_target_pose)
+    if checkpoint == 1:
+        return None
+
+    # # ACTION: Adjust Spot's height up and down depending on comfortable grasping position, find this param
+    # set_body_height(robot, body_height_offset)
+
+    # ACTION: Grasp at pixel on handle using the original frame.
+    grasp_at_pixel(robot, rgbd, handle_pixel, move_while_grasping=False)
+    if checkpoint == 2:
+        return None
+
+    # Push the drawer closed by walking straight forward.
+    push_pose = math_helpers.SE2Pose(advance_offset, 0.0, 0.0)
+    navigate_to_relative_pose(robot, push_pose)
+    if checkpoint == 3:
+        return None
+
+    open_gripper(robot)
+    if checkpoint == 4:
+        return None
+
+    move_hand_back(robot, 0.1)
+
+    stow_arm(robot)
+    if checkpoint == 5:
+        return None
+
+    return image_pil
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Close an opened drawer with Spot.")
+    parser.add_argument(
+        "--hostname",
+        type=str,
+        required=True,
+        help="Robot hostname or IP (e.g. 192.168.80.3)",
+    )
+    parser.add_argument(
+        "--map_name",
+        type=str,
+        required=True,
+        help="GraphNav map folder under spot_utils/graph_nav_maps",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=int,
+        default=5,
+        help="Checkpoint to stop after (mirrors open_drawer checkpoints)",
+    )
+    args = parser.parse_args()
+
+    sdk = create_standard_sdk("SpotCloseDrawerClient")
+    robot = sdk.create_robot(args.hostname)
+    authenticate(robot)
+    verify_estop(robot)
+
+    lease_client = robot.ensure_client(LeaseClient.default_service_name)
+    lease_client.take()
+    lease_keepalive = LeaseKeepAlive(
+        lease_client, must_acquire=True, return_at_exit=True
+    )
+
+    path = get_graph_nav_dir(args.map_name)
+    localizer = SpotLocalizer(robot, path, lease_client, lease_keepalive)
+    robot.time_sync.wait_for_sync()
+    localizer.localize()
+
+    rr.init("close-drawer-test", spawn=True)
+
+    try:
+        close_drawer(
+            robot,
+            localizer,
+            standoff_dist=0.9,
+            body_height_offset=0.0,
+            advance_offset=0.5,
+            checkpoint=args.checkpoint,
+        )
+    finally:
+        pass
+        # stow_arm(robot)

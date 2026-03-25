@@ -1,0 +1,18 @@
+[environment]
+python-version = "3.10"
+
+# Suppress false positives from third-party libraries with incomplete type stubs:
+# - protobuf: dynamic GeneratedProtocolMessageType attrs (Request, Feedback, STATUS_*, etc.)
+# - cv2: aruco submodule, overload stubs too narrow for imread/cvtColor
+# - rerun: deprecated set_time_sequence API, axis_length kwarg not in stubs
+# - open3d: visualization.draw_geometries not in stubs
+# - bosdyn: protobuf-generated message types
+# Also suppresses globals-initialized-as-None pattern (ROBOT = None assigned at runtime).
+[rules]
+invalid-type-form = "ignore"
+unresolved-attribute = "ignore"
+unresolved-import = "ignore"
+unknown-argument = "ignore"
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+no-matching-overload = "ignore"

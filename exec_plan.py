@@ -11,25 +11,33 @@ import argparse
 from typing import Dict, Optional
 
 import numpy as np
+import rerun as rr
 import yaml
 from bosdyn.client import create_standard_sdk, math_helpers
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.util import authenticate
 from numpy.typing import NDArray
 
-from skills.grasp import grasp_at_pixel
+from skills.close_cabinet import close_drawer as run_close_drawer
+from skills.drop_into_container import drop_into_container as run_drop_into_container
+from skills.erase_whiteboard import wipe_online as run_erase_whiteboard
+from skills.grasp_vlm import grasp_with_vlm
+from skills.open_cabinet import open_drawer as run_open_drawer
+from skills.place_at import place_at as run_place_at
+from skills.push_button import push_button as run_push_button
 from skills.spot_hand_move import (
     close_gripper,
     move_hand_to_relative_pose,
     open_gripper,
 )
 from skills.spot_navigation import navigate_to_absolute_pose
-from spot_utils.perception.spot_cameras import capture_images
+from skills.wipe import wipe_multiple_strokes
+
+# from skills.wipe_online import wipe_online as run_wipe_online
+from skills.wipe_online_iphone import wipe_online as run_wipe_online
 from spot_utils.spot_localization import SpotLocalizer
 from spot_utils.utils import (
     get_graph_nav_dir,
-    get_pixel_from_grounded_sam,
-    get_pixel_from_user,
     verify_estop,
 )
 
@@ -54,11 +62,25 @@ SAM_ENDPOINT = None
 SPOT_ROOM_POSE: Dict[str, float] = dict()
 
 
+def np_pose_to_SE3(X_RobEE: NDArray) -> math_helpers.SE3Pose:
+    """Convert a numpy pose array to a Spot SDK SE3Pose."""
+    return math_helpers.SE3Pose(
+        X_RobEE[0],
+        X_RobEE[1],
+        X_RobEE[2],
+        rot=math_helpers.Quat(X_RobEE[6], X_RobEE[3], X_RobEE[4], X_RobEE[5]),
+    )
+
+
 def init(hostname: str, map_name: str, endpoint_url: Optional[str]) -> None:
     """Initialize the robot and the localizer."""
     global LOCALIZER
     global ROBOT
     global SAM_ENDPOINT
+
+    # Initialize Rerun for visualization
+    rr.init("spot_plan_execution", spawn=True)
+
     sdk = create_standard_sdk("NavigationSkillTestClient")
     ROBOT = sdk.create_robot(hostname)
     authenticate(ROBOT)
@@ -97,52 +119,161 @@ def gaze(direction: str) -> None:
     move_hand_to_relative_pose(ROBOT, look_pose)
     open_gripper(ROBOT)
 
+def gaze_without_open(direction: str) -> None:
+    """Move the hand to look in a certain direction without opening the gripper."""
+    look_pose = direction_to_pose[direction]
+    move_hand_to_relative_pose(ROBOT, look_pose)
+
 
 def grasp(text_prompt: Optional[str]) -> None:
     """Grasp an object at a specified pixel."""
-    # Capture an image.
-    camera = "hand_color_image"
-    if ROBOT is not None and LOCALIZER is not None:
-        rgbd = capture_images(ROBOT, LOCALIZER, [camera])[camera]
-
-        if text_prompt and SAM_ENDPOINT:
-            # Select a pixel by querying GroundedSAM.
-            pixel = get_pixel_from_grounded_sam(rgbd.rgb, text_prompt, SAM_ENDPOINT)
-        else:
-            # Select a pixel by querying the user.
-            pixel = get_pixel_from_user(rgbd.rgb)
-
-        if pixel is not None:
-            # Grasp at the pixel with a top-down grasp.
-            top_down_rot = math_helpers.Quat.from_pitch(np.pi / 2)
-            grasp_at_pixel(ROBOT, rgbd, pixel, grasp_rot=top_down_rot)
+    assert ROBOT is not None, "Sahit why!"
+    assert LOCALIZER is not None, "SAHIT WHY!!!!"
+    grasp_with_vlm(ROBOT, LOCALIZER, text_prompt)
 
 
 def grasp_at_pose(X_RobEE: NDArray) -> None:
     """Grasp an object at a specified pose relative to the robot."""
     open_gripper(ROBOT)
-    pose = math_helpers.SE3Pose(
-        x=X_RobEE[0],
-        y=X_RobEE[1],
-        z=X_RobEE[2],
-        rot=math_helpers.Quat(X_RobEE[6], X_RobEE[3], X_RobEE[4], X_RobEE[5]),
-    )
+    pose = np_pose_to_SE3(X_RobEE)
     move_hand_to_relative_pose(ROBOT, pose.mult(grasp_offset))
     close_gripper(ROBOT)
     move_hand_to_relative_pose(ROBOT, DEFAULT_HAND_LOOK_FLOOR_POSE)
 
 
-def place_at_pose(X_RobEE: NDArray) -> None:
-    """Place an object at a specified pose relative to the robot."""
-    pose = math_helpers.SE3Pose(
-        x=X_RobEE[0],
-        y=X_RobEE[1],
-        z=X_RobEE[2],
-        rot=math_helpers.Quat(X_RobEE[6], X_RobEE[3], X_RobEE[4], X_RobEE[5]),
+def place_at_pose(z_above_surface_m: float = 0.1) -> None:
+    """Place an object using VLM-guided placement.
+
+    Uses the iPhone camera and Gemini VLM to find an open region on a table
+    surface, then places the currently held object there.
+
+    Args:
+        z_above_surface_m: Height above the detected surface to release the
+            object. Defaults to 0.1 meters.
+
+    """
+    assert ROBOT is not None, "Robot is not initialized; call init(...) first."
+    run_place_at(ROBOT, z_above_surface_m=z_above_surface_m)
+
+
+def drop(z_above_surface_m: float = 0.3) -> None:
+    """Drop an object into a container using VLM-guided placement.
+
+    Uses the iPhone camera and Gemini VLM to find an open region in a container,
+    then drops the currently held object there.
+
+    Args:
+        z_above_surface_m: Height above the detected surface to release the
+            object. Defaults to 0.1 meters.
+
+    """
+    assert ROBOT is not None, "Robot is not initialized; call init(...) first."
+    run_drop_into_container(ROBOT, z_above_surface_m=z_above_surface_m)
+
+
+def vertical_wipe(
+    X_RobEE_start: NDArray, stroke_dx: float, y_delta: float, num_strokes: int
+) -> None:
+    """Wipes a surface at a given pose with known height and width.."""
+    start_pose = np_pose_to_SE3(X_RobEE_start)
+    wipe_multiple_strokes(
+        ROBOT,
+        start_pose,
+        start_pose,
+        stroke_dx=stroke_dx,
+        stroke_dy=0,
+        delta_x_y_between_strokes=(0, y_delta),
+        num_strokes=num_strokes,
+        duration_per_stroke=3.0,
+        num_attempts_per_stroke=1,
     )
-    move_hand_to_relative_pose(ROBOT, pose.mult(grasp_offset))
-    open_gripper(ROBOT)
-    move_hand_to_relative_pose(ROBOT, DEFAULT_HAND_LOOK_FLOOR_POSE)
+
+
+def wipe_at(*args, **kwargs) -> None:
+    """Run the online wipe skill using defaults from the skill module."""
+    run_wipe_online(
+        ROBOT,
+        None,
+        None,
+        LOCALIZER,
+    )
+
+
+def erase(vlm_query_template: Optional[str] = None) -> None:
+    """Erase a whiteboard using the iPhone-driven erase skill.
+
+    Args:
+        vlm_query_template: If provided, overrides the default VLM prompt used to
+            identify writing on the whiteboard.
+
+    """
+    extra_kwargs = {}
+    if vlm_query_template is not None:
+        extra_kwargs["vlm_query_template"] = vlm_query_template
+
+    run_erase_whiteboard(
+        ROBOT,
+        None,
+        None,
+        LOCALIZER,
+        **extra_kwargs,
+    )
+
+
+def press_button(text_prompt: Optional[str]) -> None:
+    """Identify a button and push it using the hand camera.
+
+    If text_prompt is provided, it will be used as the label (e.g., "button").
+    """
+    label = text_prompt if text_prompt else "button"
+    if ROBOT is not None and LOCALIZER is not None:
+        run_push_button(
+            ROBOT,
+            label=label,
+        )
+
+
+def open_cabinet_drawer(
+    standoff_dist: float = 1.1,
+    body_height_offset: float = 0.0,
+    retreat_offset: float = 0.4,
+) -> None:
+    """Open a drawer using the high-level open_drawer skill.
+
+    This delegates to ``skills.open_drawer.open_drawer``, passing the
+    initialized global ``ROBOT`` and ``LOCALIZER``.
+    """
+    assert ROBOT is not None, "Robot is not initialized; call init(...) first."
+    assert LOCALIZER is not None, "Localizer is not initialized; call init(...) first."
+
+    run_open_drawer(
+        ROBOT,
+        LOCALIZER,
+        standoff_dist=standoff_dist,
+        body_height_offset=body_height_offset,
+        retreat_offset=retreat_offset,
+    )
+
+def close_cabinet_drawer(
+    standoff_dist: float = 0.8,
+    body_height_offset: float = 0.0,
+    advance_offset: float = 0.4,
+) -> None:
+    """Close a drawer using the high-level close_drawer skill.
+
+    This delegates to ``skills.close_drawer.close_drawer``, passing the
+    initialized global ``ROBOT`` and ``LOCALIZER``.
+    """
+    assert ROBOT is not None, "Robot is not initialized; call init(...) first."
+    assert LOCALIZER is not None, "Localizer is not initialized; call init(...) first."
+
+    run_close_drawer(
+        ROBOT,
+        LOCALIZER,
+        standoff_dist=standoff_dist,
+        body_height_offset=body_height_offset,
+        advance_offset=advance_offset,
+    )
 
 
 if __name__ == "__main__":
@@ -178,7 +309,8 @@ if __name__ == "__main__":
             SPOT_ROOM_POSE = metadata["spot-room-pose"]
         else:
             print("spot-room-pose not found in metadata.yaml, using default val")
-            SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "z": 0.0}
+            SPOT_ROOM_POSE = {"x": 0.0, "y": 0.0, "angle": 0.0}
+            
     with open(args.plan, "r") as plan_file:
         exec(plan_file.read())
     print("done")

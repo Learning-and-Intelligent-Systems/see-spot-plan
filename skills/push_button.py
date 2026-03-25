@@ -1,0 +1,540 @@
+"""Skill to identify a button and push it.
+
+This module reuses existing perception and manipulation helpers. It supports
+three selection modes for the button location:
+1) VLM-based bounding box (Gemini) → center pixel
+2) GroundedSAM endpoint → center pixel from mask
+3) Manual click from user
+"""
+
+import argparse
+import json
+import os
+from datetime import datetime
+from typing import List, Literal, Optional, Tuple
+
+import cv2
+import numpy as np
+import rerun as rr
+from bosdyn.client import create_standard_sdk, math_helpers
+from bosdyn.client.frame_helpers import (
+    BODY_FRAME_NAME,
+    HAND_FRAME_NAME,
+    get_a_tform_b,
+)
+from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
+from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.client.sdk import Robot
+from bosdyn.client.util import authenticate
+from PIL import Image, ImageDraw
+
+from skills.spot_hand_move import (
+    close_gripper,
+    move_hand_to_relative_pose,
+    move_hand_to_relative_pose_with_velocity,
+    open_gripper,
+    stow_arm,
+)
+from spot_utils.perception.spot_cameras import capture_images
+from spot_utils.pretrained_model_interface import GoogleGeminiVLM
+from spot_utils.spot_localization import SpotLocalizer
+from spot_utils.utils import get_graph_nav_dir, verify_estop
+
+
+def init_robot(hostname: str, map_name: str) -> tuple[Robot, LeaseClient, LeaseKeepAlive, SpotLocalizer]:
+    """Initialize the robot connection, authenticate, sync time, and localize."""
+    sdk = create_standard_sdk("WipeOnlineClient")
+    robot = sdk.create_robot(hostname)
+    authenticate(robot)
+    verify_estop(robot)
+    lease_client = robot.ensure_client(LeaseClient.default_service_name)
+    lease_client.take()
+    lease_keepalive = LeaseKeepAlive(
+        lease_client, must_acquire=True, return_at_exit=True
+    )
+    robot.time_sync.wait_for_sync()
+    
+    # Initialize localizer
+    path = get_graph_nav_dir(map_name)
+    localizer = SpotLocalizer(robot, path, lease_client, lease_keepalive)
+    localizer.localize()
+    print("[INFO] Localization successful.")
+    
+    return robot, lease_client, lease_keepalive, localizer
+
+DEFAULT_HAND_LOOK_FLOOR_POSE = math_helpers.SE3Pose(
+    x=0.80, y=0.0, z=0.25, rot=math_helpers.Quat.from_pitch(np.pi / 3)
+)
+
+DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE = math_helpers.SE3Pose(
+    x=0.80, y=0.0, z=0.35, rot=math_helpers.Quat.from_pitch(np.pi / 2)
+)
+
+direction_to_pose = {
+    "DOWN": DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE,
+    "AHEAD": DEFAULT_HAND_LOOK_FLOOR_POSE,
+}
+
+def gaze(robot, direction: str) -> None:
+    """Move the hand to look in a certain direction."""
+    look_pose = direction_to_pose[direction]
+    move_hand_to_relative_pose(robot, look_pose)
+    open_gripper(robot)
+
+
+def get_points_from_pixels(rgb_image_path, depth_image_path, intrinsics):
+    """Back-project RGB and depth images into a 3D point cloud with colors."""
+    rgb = cv2.imread(rgb_image_path, cv2.IMREAD_COLOR)
+    depth = cv2.imread(depth_image_path, cv2.IMREAD_UNCHANGED)
+
+    if rgb is None:
+        raise FileNotFoundError(f"Could not read RGB image at: {rgb_image_path}")
+    if depth is None:
+        raise FileNotFoundError(f"Could not read depth image at: {depth_image_path}")
+
+    # Ensure single-channel depth
+    if depth.ndim == 3:
+        depth = cv2.cvtColor(depth, cv2.COLOR_BGR2GRAY)
+
+    # Convert depth to meters if given as uint16 millimeters
+    if depth.dtype == np.uint16:
+        depth_m = depth.astype(np.float32) / 1000.0
+    else:
+        depth_m = depth.astype(np.float32)
+
+    h, w = depth_m.shape
+    if rgb.shape[:2] != (h, w):
+        rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    fx, fy, cx, cy = intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]
+
+    # Create pixel grid
+    u_coords, v_coords = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+
+    z = depth_m
+    valid = (z > 0) & (z <= 1.5)
+
+    x = (u_coords - cx) / fx * z
+    y = (v_coords - cy) / fy * z
+
+    # Stack and mask
+    points = np.stack((x, y, z), axis=-1)[valid]
+    if points.shape[0] == 0:
+        print("No points passed the depth filter! Check depth image units and max distance.")
+
+    # Colors: convert BGR (cv2) to RGB and normalize to [0,1]
+    rgb_rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+    colors = (rgb_rgb.reshape(-1, 3)[valid.ravel()] / 255.0).astype(np.float32)
+    print("positions:", points.shape, points.dtype)
+    print("colors:", colors.shape, colors.dtype)
+    return points, colors
+
+
+def get_multiple_pixels_from_gemini(
+    vlm_query_str: str, pil_image: Image.Image, num_pixels: int = 15
+) -> List[Tuple[int, int]]:
+    """Query Gemini VLM to return multiple pixels on the target object.
+
+    Expects the model to respond with a JSON array like:
+    [ {"point": [y, x]}, ... ] with coordinates normalized to [0, 1000].
+    """
+    vlm = GoogleGeminiVLM("gemini-2.5-pro")
+
+    def parse_json_output(json_output_str: str) -> str:
+        lines = json_output_str.splitlines()
+        for i, line in enumerate(lines):
+            if line.strip() == "```json":
+                json_output_str = "\n".join(lines[i + 1 :])
+                json_output_str = json_output_str.split("```")[0]
+                break
+        json_output_str = json_output_str.strip()
+        return json_output_str
+
+    vlm_output_list = vlm.sample_completions(
+        prompt=vlm_query_str,
+        imgs=[pil_image],
+        temperature=0.0,
+        seed=42,
+        num_completions=1,
+    )
+    vlm_output_str = vlm_output_list[0]
+    json_string_to_parse = parse_json_output(vlm_output_str)
+    parsed_data = json.loads(json_string_to_parse)
+
+    if not isinstance(parsed_data, list) or not parsed_data:
+        raise ValueError("Parsed JSON is not a non-empty list.")
+    # if len(parsed_data) < num_pixels:
+    #     raise ValueError(f"Parsed JSON has less than {num_pixels} points.")
+
+    pixels: List[Tuple[int, int]] = []
+    for point_obj in parsed_data[:num_pixels]:
+        if (
+            "point" not in point_obj
+            or not isinstance(point_obj["point"], list)
+            or len(point_obj["point"]) != 2
+        ):
+            raise ValueError(
+                "Some element in JSON does not contain a valid 'point' list [y, x]."
+            )
+        y_norm, x_norm = point_obj["point"]
+        if not isinstance(y_norm, (int, float)) or not isinstance(x_norm, (int, float)):
+            raise ValueError("Normalized coordinates are not numbers.")
+        img_height = pil_image.height
+        img_width = pil_image.width
+        y = int(y_norm * img_height / 1000.0)
+        x = int(x_norm * img_width / 1000.0)
+        y = max(0, min(y, img_height - 1))
+        x = max(0, min(x, img_width - 1))
+        pixels.append((x, y))
+
+    return pixels
+
+
+def get_single_pixel_from_gemini(vlm_query_str: str, pil_image: Image.Image) -> Tuple[int, int]:
+    """Query Gemini VLM to return a single (x, y) pixel on the target object."""
+    pixels = get_multiple_pixels_from_gemini(vlm_query_str, pil_image, num_pixels=1)
+    if not pixels:
+        raise ValueError("Gemini returned no pixels for single-pixel query.")
+    return pixels[0]
+
+
+def overlay_pixels_on_image(
+    image: Image.Image,
+    pixels: List[Tuple[int, int]],
+    color: Tuple[int, int, int] = (255, 0, 0),
+    radius: int = 3,
+) -> Image.Image:
+    """Draw small circles at the given (x, y) pixels on a copy of the image."""
+    draw = ImageDraw.Draw(image)
+    for x, y in pixels:
+        draw.ellipse(
+            (x - radius, y - radius, x + radius, y + radius),
+            outline=color,
+            width=2,
+        )
+    return image
+
+
+def _pixel_to_body_xyz(u: int, v: int, rgbd, intrinsics: Tuple[float, float, float, float]) -> np.ndarray:
+    """Back-project pixel (u,v) to BODY frame using supplied intrinsics."""
+    from bosdyn.client.frame_helpers import (
+        BODY_FRAME_NAME,
+        VISION_FRAME_NAME,
+        get_a_tform_b,
+    )
+
+    depth = rgbd.depth
+    depth_m = (
+        depth.astype(np.float32) / 1000.0 if depth.dtype == np.uint16 else depth.astype(np.float32)
+    )
+    if v < 0 or v >= depth_m.shape[0] or u < 0 or u >= depth_m.shape[1]:
+        raise ValueError("Pixel out of bounds")
+    z = float(depth_m[v, u])
+    if not np.isfinite(z) or z <= 0:
+        win = 3
+        v0, v1 = max(0, v - win), min(depth_m.shape[0], v + win + 1)
+        u0, u1 = max(0, u - win), min(depth_m.shape[1], u + win + 1)
+        patch = depth_m[v0:v1, u0:u1]
+        vals = patch[np.isfinite(patch) & (patch > 0)]
+        if vals.size == 0:
+            raise RuntimeError("No valid depth near pixel")
+        z = float(np.median(vals))
+
+    fx, fy, cx, cy = intrinsics
+    x_cam = (u - cx) / fx * z
+    y_cam = (v - cy) / fy * z
+    p_cam_h = np.array([x_cam, y_cam, z, 1.0], dtype=np.float64)
+
+    T_vision_cam = get_a_tform_b(
+        rgbd.transforms_snapshot, VISION_FRAME_NAME, rgbd.frame_name_image_sensor
+    ).to_matrix()
+    T_body_vision = get_a_tform_b(
+        rgbd.transforms_snapshot, BODY_FRAME_NAME, VISION_FRAME_NAME
+    ).to_matrix()
+    return (T_body_vision @ (T_vision_cam @ p_cam_h))[:3]
+
+
+def _pixel_to_camera_xyz(u: int, v: int, rgbd, intrinsics: Tuple[float, float, float, float]) -> np.ndarray:
+    """Back-project pixel (u,v) to camera frame using supplied intrinsics."""
+    depth = rgbd.depth
+    depth_m = (
+        depth.astype(np.float32) / 1000.0 if depth.dtype == np.uint16 else depth.astype(np.float32)
+    )
+    if v < 0 or v >= depth_m.shape[0] or u < 0 or u >= depth_m.shape[1]:
+        raise ValueError("Pixel out of bounds")
+    z = float(depth_m[v, u])
+    if not np.isfinite(z) or z <= 0:
+        win = 3
+        v0, v1 = max(0, v - win), min(depth_m.shape[0], v + win + 1)
+        u0, u1 = max(0, u - win), min(depth_m.shape[1], u + win + 1)
+        patch = depth_m[v0:v1, u0:u1]
+        vals = patch[np.isfinite(patch) & (patch > 0)]
+        if vals.size == 0:
+            raise RuntimeError("No valid depth near pixel")
+        z = float(np.median(vals))
+
+    fx, fy, cx, cy = intrinsics
+    x_cam = (u - cx) / fx * z
+    y_cam = (v - cy) / fy * z
+    return np.array([x_cam, y_cam, z], dtype=np.float32)
+
+
+def get_current_hand_pose_body(robot):
+    """Return the current hand pose in the body frame as an SE3Pose."""
+    robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
+    robot_state = robot_state_client.get_robot_state()
+
+    # Transform from BODY → HAND
+    body_tform_hand = get_a_tform_b(
+        robot_state.kinematic_state.transforms_snapshot,
+        BODY_FRAME_NAME,
+        HAND_FRAME_NAME,
+    )
+
+    # Convert to SE3Pose
+    return math_helpers.SE3Pose.from_proto(body_tform_hand.to_proto())
+
+def push_button(
+    robot: Robot,
+    localizer: SpotLocalizer,
+    label: str = "button",
+    surface: Literal["vertical", "horizontal"] = "horizontal",
+    z_clearance: float = 0.15,
+    press_depth: float = 0.035,
+    press_duration: float = 0.5,
+) -> None:
+    """Identify a button and push on it.
+
+    Args:
+        robot: Spot robot handle
+        localizer: Localizer for camera capture
+        label: Target label to find (default: "button")
+        surface: "vertical" to push forward, "horizontal" to push downward
+        z_clearance: Approach standoff distance in meters
+        press_depth: Distance above the button to press the button (to account for spot finger length)
+        press_duration: Duration for press motion (s)
+
+    """
+    # 1) Prepare and capture
+    stow_arm(robot)
+
+    gaze(robot, "DOWN") ## this looks straight down at the button 
+    ## this behavior changes if the button is on the wall
+
+    rgbd = capture_images(robot, localizer, camera_names=["hand_color_image"])
+    rgbd = rgbd["hand_color_image"]
+    rgb = rgbd.rgb
+    depth = rgbd.depth
+    pil = Image.fromarray(rgb)
+
+    rr.log("image/rgb", rr.Image(rgb))
+    rr.log("image/depth", rr.Image(depth))
+
+    # get the 3D points from the rgb and depth images, and the camera intrinsics
+    cam_model = rgbd.camera_model  
+
+    fx = cam_model.intrinsics.focal_length.x
+    fy = cam_model.intrinsics.focal_length.y
+    cx = cam_model.intrinsics.principal_point.x
+    cy = cam_model.intrinsics.principal_point.y
+
+    intrinsics = [fx, fy, cx, cy]
+
+    save_folderpath = "push_button_images"
+    os.makedirs(save_folderpath, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ## save the rgb and the depth image to the disk
+    rgb_pil = Image.fromarray(rgb)
+    depth_pil = Image.fromarray(depth)
+    rgb_pil.save(os.path.join(save_folderpath, f"rgb_{timestamp}.png"))
+    depth_pil.save(os.path.join(save_folderpath, f"depth_{timestamp}.png"))
+
+    points, colors = get_points_from_pixels(os.path.join(save_folderpath, f"rgb_{timestamp}.png"), os.path.join(save_folderpath, f"depth_{timestamp}.png"), intrinsics)
+    rr.log("pcd", rr.Points3D(positions=points, colors=colors, radii=0.001))
+    num_points = 10
+
+    # 2) Select a single center pixel via VLM (this will be used as the press target).
+    vlm_query_center = f"""
+    Point to the center of the {label} in the image. Return a JSON list with exactly one element like
+    [{{"point": [y, x]}}] with coordinates normalized to 0-1000.
+    """
+    center_pixel = get_single_pixel_from_gemini(vlm_query_center, pil)
+
+    vlm_query = f"""
+    Point up to {num_points} points on the top surface of the {label} in the image. Return a JSON list like [{{"point": [y, x]}}, ...] with coordinates normalized to 0-1000.
+    """
+    # 3) Select additional pixels via VLM (used for plane/normal estimation + visualization).
+    pixels = get_multiple_pixels_from_gemini(vlm_query, pil, num_pixels=num_points)
+
+    # Log Gemini-selected pixels as 2D points and as an annotated image.
+    annotated_pil = pil.copy()
+    if pixels:
+        pixels_arr = np.array(pixels, dtype=np.float32)
+        rr.log("image/button_pixels", rr.Points2D(positions=pixels_arr))
+        annotated_pil = overlay_pixels_on_image(annotated_pil, pixels, color=(0, 0, 255), radius=3)
+
+    # rr.log("image/button_center_pixel", rr.Points2D(positions=np.array([center_pixel], dtype=np.float32)))
+    annotated_pil = overlay_pixels_on_image(annotated_pil, [center_pixel], color=(0, 255, 0), radius=5)
+    rr.log("image/rgb_annotated", rr.Image(np.array(annotated_pil)))
+
+    # Log Gemini-selected pixels in 3D (camera frame), alongside the camera-frame point cloud.
+    # NOTE: `points` from `get_points_from_pixels` are in camera coordinates, so we back-project into camera frame here.
+    button_pts3d: List[np.ndarray] = []
+    for (u_px, v_px) in pixels:
+        try:
+            p_cam = _pixel_to_camera_xyz(int(u_px), int(v_px), rgbd, (fx, fy, cx, cy))
+            if np.all(np.isfinite(p_cam)):
+                button_pts3d.append(np.asarray(p_cam, dtype=np.float32))
+        except Exception:
+            continue
+    if button_pts3d:
+        button_pts3d_arr = np.vstack(button_pts3d).astype(np.float32)
+        button_cols = np.tile(np.array([[0, 0, 255]], dtype=np.uint8), (button_pts3d_arr.shape[0], 1))
+        rr.log(
+            "pcd/button_pixels3d",
+            rr.Points3D(positions=button_pts3d_arr, colors=button_cols, radii=0.005),
+        )
+
+    try:
+        center_cam = _pixel_to_camera_xyz(int(center_pixel[0]), int(center_pixel[1]), rgbd, (fx, fy, cx, cy))
+        rr.log(
+            "pcd/button_center3d",
+            rr.Points3D(
+                positions=np.array([center_cam], dtype=np.float32),
+                colors=np.array([[0, 255, 0]], dtype=np.uint8),
+                radii=0.005,
+            ),
+        )
+    except Exception:
+        # If depth is invalid at the center pixel, we still proceed with 2D visualization + press fallback.
+        pass
+
+    # 4) Back-project multi-pixels to BODY frame (filter invalid) for plane/normal estimation.
+    pts_body: List[np.ndarray] = []
+    for (u_px, v_px) in pixels:
+        try:
+            p = _pixel_to_body_xyz(int(u_px), int(v_px), rgbd, (fx, fy, cx, cy))
+            if np.all(np.isfinite(p)):
+                pts_body.append(np.asarray(p, dtype=np.float64))
+        except Exception:
+            continue
+
+    # Press target: use center pixel back-projection, with fallback to mean of multi-pixels.
+    press_point_body: Optional[np.ndarray] = None
+    try:
+        u_center, v_center = int(center_pixel[0]), int(center_pixel[1])
+        p_center = _pixel_to_body_xyz(u_center, v_center, rgbd, (fx, fy, cx, cy))
+        press_point_body = np.asarray(p_center, dtype=np.float64)
+    except Exception:
+        press_point_body = None
+
+    if press_point_body is None:
+        if not pixels:
+            raise RuntimeError("No pixels available for press target (center pixel failed and multi-pixels empty).")
+        u_mean = int(round(np.mean([u for (u, _) in pixels])))
+        v_mean = int(round(np.mean([v for (_, v) in pixels])))
+        p = _pixel_to_body_xyz(u_mean, v_mean, rgbd, (fx, fy, cx, cy))
+        press_point_body = np.asarray(p, dtype=np.float64)
+
+    # If insufficient valid 3D points from multi-pixels, fall back to a default normal.
+    P = np.vstack(pts_body) if len(pts_body) > 0 else press_point_body.reshape(1, 3)
+
+    def fit_plane_to_points(points_body: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        assert points_body.shape[1] == 3
+        centroid = np.mean(points_body, axis=0)
+        Q = points_body - centroid
+        # SVD for plane normal (smallest singular vector)
+        _, _, vh = np.linalg.svd(Q, full_matrices=False)
+        normal = vh[-1, :]
+        normal_norm = np.linalg.norm(normal)
+        normal = normal / normal_norm if normal_norm > 1e-9 else np.array([1.0, 0.0, 0.0])
+        # Ensure forward-facing (+x in BODY)
+        if normal[0] < 0:
+            normal = -normal
+        return centroid, normal
+
+    if P.shape[0] >= 3:
+        _, normal_body = fit_plane_to_points(P)
+    else:
+        normal_body = np.array([1.0, 0.0, 0.0])
+
+    # 4) Build approach/press poses.
+    # For horizontal surfaces, use a "tip-down" orientation (hand looking down)
+    # and press along the body Z axis so the tip of the hand makes contact.
+    if surface == "horizontal":
+        tip_down_rot = DEFAULT_HAND_LOOK_STRAIGHT_DOWN_POSE.rot
+        approach = math_helpers.SE3Pose(
+            x=float(press_point_body[0]+0.02),
+            y=float(press_point_body[1]),
+            z=float(press_point_body[2] + z_clearance),
+            rot=tip_down_rot,
+        )
+        press = math_helpers.SE3Pose(
+            x=float(press_point_body[0]+0.02),
+            y=float(press_point_body[1]),
+            z=float(press_point_body[2] + press_depth),
+            rot=tip_down_rot,
+        )
+    else:
+        # Preserve the previous normal-based behavior for vertical surfaces:
+        # align the hand's forward axis with the plane normal and press along it.
+        approach = math_helpers.SE3Pose(
+            x=float(press_point_body[0] - z_clearance * normal_body[0]),
+            y=float(press_point_body[1] - z_clearance * normal_body[1]),
+            z=float(press_point_body[2] - z_clearance * normal_body[2]),
+            rot=math_helpers.Quat(),  # temporary; set below
+        )
+
+        press = math_helpers.SE3Pose(
+            x=float(press_point_body[0] - press_depth * normal_body[0]),
+            y=float(press_point_body[1] - press_depth * normal_body[1]),
+            z=float(press_point_body[2] - press_depth * normal_body[2]),
+            rot=math_helpers.Quat(),
+        )
+
+        # Orient hand so its forward axis aligns with normal (yaw+pitch approximation)
+        nx, ny, nz = normal_body
+        yaw = float(np.arctan2(ny, nx))
+        hyp = float(np.sqrt(nx * nx + ny * ny))
+        pitch = float(-np.arctan2(nz, max(hyp, 1e-9)))
+        rot = math_helpers.Quat.from_yaw(yaw) * math_helpers.Quat.from_pitch(pitch)
+        approach = math_helpers.SE3Pose(x=approach.x, y=approach.y, z=approach.z, rot=rot)
+        press = math_helpers.SE3Pose(x=press.x, y=press.y, z=press.z, rot=rot)
+
+    print("press point body:", press_point_body)
+    print("current hand pose:", get_current_hand_pose_body(robot))
+    print("approach:", approach)
+    print("press:", press)
+    # print("no action this time")
+
+    ## close the gripper 
+    close_gripper(robot)
+
+    # 5) Execute approach, press, retreat, and stow
+    move_hand_to_relative_pose(robot, approach)
+    move_hand_to_relative_pose_with_velocity(robot, approach, press, press_duration)
+    move_hand_to_relative_pose_with_velocity(robot, press, approach, press_duration)
+    stow_arm(robot)
+
+def main():
+    """Parse arguments and run the push-button skill."""
+    parser = argparse.ArgumentParser(description="Online wiping controller.")
+    parser.add_argument(
+        "--hostname",
+        type=str,
+        required=True,
+        help="Spot hostname/IP (e.g., 192.168.80.3)",
+    )
+    parser.add_argument(
+        "--map_name",
+        type=str,
+        required=True,
+        help="The name of the map folder to load (sub-folder under graph_nav_maps)",
+    )
+    args = parser.parse_args()
+    robot, lease_client, lease_keepalive, localizer = init_robot(args.hostname, args.map_name)
+    rr.init("push_button", spawn=True)
+    push_button(robot, localizer)
+
+if __name__ == "__main__":
+    main()

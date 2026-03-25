@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package kiwi;
+
+// Frame bundle containing ARKit data for streaming
+message FrameBundle {
+  // Frame metadata
+  double timestamp = 1;
+  uint64 frame_number = 2;
+
+  // Camera intrinsics (3x3 matrix flattened, 9 values)
+  repeated float intrinsics = 3;
+
+  // Camera pose (4x4 transform flattened, 16 values)
+  repeated float transform = 4;
+
+  // RGB image data (JPEG compressed)
+  bytes rgb_image_data = 5;
+  int32 image_width = 6;
+  int32 image_height = 7;
+
+  // Depth data (optional, raw float32 array)
+  bytes depth_data = 8;
+  int32 depth_width = 9;
+  int32 depth_height = 10;
+}
